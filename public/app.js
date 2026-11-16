@@ -2,7 +2,7 @@
 // Data lives in localStorage as small records and syncs to the Worker when a
 // sync key is set, so the app keeps working offline.
 import { MIN, DAY, WD, MO, uid, tz, loc, dayKey, keyTs, addDays, fmtTime, fmtDay, fmtWhen,
-  occurrences, repText, remText, fires, complete, taskLog, level } from "./shared.js";
+  occurrences, repText, remText, fires, habitTimes, habitNeed, complete, taskLog, level } from "./shared.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -15,7 +15,71 @@ const DEF = { id: "settings", type: "settings", tzOff: -new Date().getTimezoneOf
   defOff: 0, defCh: ["push"], digestAt: "08:30", digestCh: ["push"], sound: true, theme: "auto", tap: { label: "", value: 0 } };
 const CHS = [["push", "🔔 Push"], ["alarm", "⏰ Alarm"], ["tg", "✈️ Telegram"], ["email", "✉️ Email"]];
 const PRE = [0, 5, 10, 15, 30, 60, 120, 1440, 2880, 10080];
-const COLORS = ["#ED9C8C", "#ECBC6A", "#C0CA76", "#8AC290", "#71C0B6", "#7EABDD", "#A598DA", "#DE8CB6", "#F7D54A", "#9AA5AF"];
+// The three tally-counter palettes, each with brown, teal, turquoise and olive added.
+const PAL = [
+  ["Pastels", ["#F6C7BD", "#F7DDA6", "#E5E5A8", "#C6E5B4", "#B4E1D8", "#BCD7F2", "#CEC8EF", "#F2C5DE", "#FFF3A3", "#FFFFFF", "#D8BBA4", "#8FC7C2", "#A5E8EC", "#C9CC9A"]],
+  ["Medium", ["#ED9C8C", "#ECBC6A", "#C0CA76", "#8AC290", "#71C0B6", "#7EABDD", "#A598DA", "#DE8CB6", "#F7D54A", "#9AA5AF", "#B07F5C", "#3F9C96", "#45C7CF", "#8F9440"]],
+  ["Deeper", ["#E4705C", "#E09A2E", "#9BAF45", "#4FA06B", "#2E9E93", "#3F7FC8", "#7C68C4", "#C9538F", "#F2BE00", "#15181C", "#7A4A2B", "#0F6E69", "#0E9AA7", "#5F6B1E"]],
+];
+const COLORS = PAL[1][1];
+const GRIP = '<svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.8"/><circle cx="15" cy="6" r="1.8"/><circle cx="9" cy="12" r="1.8"/><circle cx="15" cy="12" r="1.8"/><circle cx="9" cy="18" r="1.8"/><circle cx="15" cy="18" r="1.8"/></svg>';
+const ICON_RULES = [
+  ["water|drink|hydrat", "💧"], ["read|book|novel", "📚 📖"], ["study|learn|course|homework|revis|exam|class", "📖 🧠"],
+  ["gym|workout|exercise|lift|weight|train", "🏋️"], ["run|jog|cardio", "🏃"], ["walk|steps|stroll|hike", "🚶"],
+  ["yoga|stretch|meditat|mindful|breath", "🧘"], ["cycl|bike", "🚴"], ["swim", "🏊"], ["sleep|bed|nap|wake", "😴 🛌"],
+  ["vitamin|pill|medic|tablet|supplement", "💊"], ["teeth|brush|floss", "🦷"], ["shower|bath|skin|face|cream|hair|groom", "🚿 🧴"],
+  ["cook|meal|dinner|lunch|breakfast|eat|kitchen", "🍳 🍽️"], ["fruit|apple", "🍎"], ["salad|veg", "🥗"], ["coffee", "☕"], ["tea\\b", "🍵"],
+  ["journal|diary|write|writing|blog|note", "✍️ 📝"], ["code|coding|program|leetcode|debug", "💻"], ["email|mail|inbox", "📧"],
+  ["call|phone|mom|dad|family|friend", "📞"], ["budget|money|expense|saving|invest|bill|financ", "💰"],
+  ["clean|tidy|vacuum|sweep|dust|declutter", "🧹"], ["laundry|clothes|wash", "🧺"], ["dish", "🍽️"], ["plant|garden", "🌱"],
+  ["hamster", "🐹"], ["dog|puppy", "🐶"], ["cat\\b|kitten", "🐱"], ["guitar", "🎸"], ["piano|music|sing|practi[cs]e|instrument", "🎹"],
+  ["draw|paint|sketch|art\\b", "🎨"], ["game|gaming", "🎮"], ["photo|camera", "📷"], ["sun|outside|outdoor|fresh air", "☀️"],
+  ["pray|gratitude|thank", "🙏"], ["plan|schedule|calendar|review|todo", "📅"], ["doctor|checkup|health|weigh|blood", "🩺"], ["shop|grocer", "🛒"],
+].map((r) => ({ re: new RegExp("\\b(?:" + r[0] + ")", "i"), icons: r[1].split(" ") }));
+const EMOJI_GROUPS = [
+  ["Health", "💧 🏃 🚶 🏋️ 🧘 🚴 🏊 💊 🦷 😴 🛌 🚿 🧴 🩺 ❤️"], ["Mind", "📚 📖 ✍️ 📝 🧠 🎯 💡 🎧 🙏 🔬 📅"], ["Work", "💻 📧 📞 💼 📊 💰 🧾"],
+  ["Home", "🧹 🧺 🍽️ 🛒 🌱 🐹 🐶 🐱 🔧"], ["Food", "🍳 🥣 🍎 🥗 ☕ 🍵 🥦 🍞"], ["Fun", "🎸 🎹 🎨 🎮 📷 🎬 ☀️ 🌙 ✈️ ⭐ 🔥 ✅"],
+];
+function suggestIcons(name) {
+  const out = [];
+  if (!String(name || "").trim()) return out;
+  for (const r of ICON_RULES) if (r.re.test(name)) for (const e of r.icons) if (!out.includes(e)) out.push(e);
+  return out.slice(0, 5);
+}
+function firstGrapheme(str) {
+  str = String(str || "").trim();
+  try { if (Intl.Segmenter) { for (const g of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(str)) return g.segment; return ""; } } catch (e) {}
+  return Array.from(str).slice(0, 2).join("");
+}
+function rgbOf(hex) {
+  let h = String(hex).replace("#", "");
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  return [parseInt(h.slice(0, 2), 16) || 0, parseInt(h.slice(2, 4), 16) || 0, parseInt(h.slice(4, 6), 16) || 0];
+}
+const lumOf = (hex) => { const c = rgbOf(hex).map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+// Dark text on pale colours, white text on deep ones.
+const inkOn = (hex) => (lumOf(hex) > 0.3 ? "#18212B" : "#FFFFFF");
+// White and near-black habits would vanish against the card, so they are drawn with visible neighbours.
+const calColor = (hex) => { const L = lumOf(hex); return L > 0.85 ? "#C5CDD5" : L < 0.03 ? "#56626F" : hex; };
+const blend = (top, under, a) => { const A = rgbOf(top), B = rgbOf(under); return "#" + [0, 1, 2].map((i) => pad(Math.round(B[i] + (A[i] - B[i]) * a).toString(16))).join(""); };
+const cssHex = (name, dflt) => { const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim(); return /^#[0-9a-f]{6}$/i.test(v) ? v : dflt; };
+// A day's colour deepens with how much of it is done, from a faint wash to the full colour.
+function shade(base, lv) {
+  if (lv <= 0) return null;
+  const bg = lv >= 1 ? base : blend(base, cssHex("--card", "#FFFFFF"), 0.14 + 0.72 * lv);
+  return { bg, ink: inkOn(bg) };
+}
+// Tally marks: four uprights and a slash per five.
+function marks(v) {
+  let groups = Math.floor(v / 5), h = "";
+  const rem = v % 5, extra = Math.max(0, groups - 11);
+  groups -= extra;
+  const g = (n) => { const w = n === 5 ? 22 : (n - 1) * 5 + 4; let d = ""; for (let i = 0; i < Math.min(n, 4); i++) d += "M" + (2 + i * 5) + " 2V20"; return '<svg viewBox="0 0 ' + w + ' 22" style="width:' + w + 'px" aria-hidden="true"><path d="' + d + '"/>' + (n === 5 ? '<path d="M0 19L20 3"/>' : "") + "</svg>"; };
+  if (extra) h += '<span class="more">+' + extra * 5 + "</span>";
+  for (let i = 0; i < groups; i++) h += g(5);
+  if (rem) h += g(rem);
+  return '<span class="marks">' + h + "</span>";
+}
 const TITLES = ["Seedling", "Sprout", "Starter", "Mover", "Builder", "Steady", "In flow", "Trailblazer", "Unstoppable", "Legend"];
 const ICON = {
   today: '<svg viewBox="0 0 24 24"><path d="M4 12l5 5L20 6"/></svg>',
@@ -49,6 +113,7 @@ const items = () => all("item");
 const lists = () => all("list").sort((a, b) => (a.ord || 0) - (b.ord || 0));
 const habits = () => all("habit").sort((a, b) => (a.ord || 0) - (b.ord || 0));
 const logs = () => all("log");
+const all_ = all;
 const hhmm = (ts) => { const d = loc(ts, O()); return pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()); };
 
 async function api(path, body) {
@@ -104,15 +169,39 @@ function game() {
   }
   return (memo = { xp, ...level(xp), streak, best, freezes, frozen });
 }
-function habitStats(h) {
-  const t = today(), freq = h.freq || 1, done = h.done || {};
-  const days = Object.keys(done).filter((k) => done[k] >= freq).sort(), S = new Set(days);
-  let total = 0, best = 0, run = 0, prev = null, cur = 0;
-  for (const k in done) total += done[k];
+const tagKey = (t) => String(t || "").trim().toLowerCase();
+// Habits grouped by tag, A to Z, untagged last. The first spelling seen names the group.
+function tagGroups(list) {
+  const map = {}, keys = [];
+  for (const c of list) { const k = tagKey(c.tag); if (!map[k]) { map[k] = { key: k, label: String(c.tag || "").trim(), tasks: [] }; keys.push(k); } map[k].tasks.push(c); }
+  keys.sort((a, b) => (!a ? 1 : !b ? -1 : a.localeCompare(b)));
+  return keys.map((k) => map[k]);
+}
+// A habit counts on a day from the day it was made, or on any earlier day that has a check-off.
+const applies = (h, k) => k >= dayKey(h.created || 0, O()) || !!(h.done || {})[k];
+// How done a day is across the given habits.
+function dayInfo(list, k) {
+  let applicable = 0, complete = 0, partial = 0;
+  for (const c of list) {
+    if (!applies(c, k)) continue;
+    applicable++;
+    const n = (c.done || {})[k] || 0, f = c.freq || 1;
+    if (n >= f) complete++; else if (n > 0) partial += n / f;
+  }
+  return { applicable, complete, ratio: applicable ? complete / applicable : 0, frac: applicable ? (complete + partial) / applicable : 0, full: applicable > 0 && complete === applicable };
+}
+const dayLevel = (info) => (info.applicable > 1 ? info.ratio : info.frac);
+// Current streak counts back from today, or from yesterday while today is still unfinished.
+function calStats(list) {
+  const t = today(), keys = new Set();
+  let checks = 0, best = 0, run = 0, prev = null, cur = 0;
+  for (const c of list) for (const k in c.done || {}) { keys.add(k); checks += c.done[k]; }
+  const days = [...keys].filter((k) => dayInfo(list, k).full).sort(), S = new Set(days);
   for (const k of days) { run = prev && addDays(prev, 1) === k ? run + 1 : 1; best = Math.max(best, run); prev = k; }
   for (let k = S.has(t) ? t : addDays(t, -1); S.has(k); k = addDays(k, -1)) cur++;
-  return { cur, best, days: days.length, total };
+  return { cur, best, days: days.length, total: checks };
 }
+const habitStats = (h) => calStats([h]);
 const habitDone = (h, k) => ((h.done || {})[k] || 0) >= (h.freq || 1);
 const startToday = () => keyTs(today(), O());
 
@@ -249,7 +338,8 @@ function quickPreview(text) {
 }
 
 // ================= views =================
-const ui = { tab: "today", filter: "inbox", q: "", month: today().slice(0, 7), sel: today(), calMode: "month", habit: "", showDone: false };
+const ui = { tab: "today", filter: "inbox", q: "", month: today().slice(0, 7), sel: today(), calMode: "month", showDone: false,
+  hcal: "all", hmonth: today().slice(0, 7), hSort: lsGet("onward.hsort") === "tag" ? "tag" : "manual", hFilter: "", selecting: false, selected: {}, collapsed: {} };
 const TABS = [["today", "Today"], ["tasks", "Tasks"], ["cal", "Calendar"], ["habits", "Habits"], ["focus", "Focus"]];
 
 const listOf = (it) => (it.list && db.recs[it.list] && !db.recs[it.list].del ? db.recs[it.list] : null);
@@ -273,14 +363,25 @@ function row(it, opt = {}) {
 }
 const quickAdd = (ph) => '<div class="card qa"><input id="qa" type="text" enterkeyhint="done" autocomplete="off" placeholder="' + esc(ph) +
   '" aria-label="Quick add"><button data-a="qaAdd" aria-label="Add">+</button></div><div class="qap" id="qap"></div>';
-const habitRow = (h) => {
-  const k = today(), n = (h.done || {})[k] || 0, freq = h.freq || 1, full = n >= freq, st = habitStats(h);
-  return '<div class="hrow"><button class="hbtn' + (full ? " full" : "") + '" style="--hc:' + esc(h.color) + '" data-a="habit" data-id="' + h.id +
+const habitRow = (h, m = {}) => {
+  const k = today(), n = (h.done || {})[k] || 0, freq = h.freq || 1, full = n >= freq, st = habitStats(h), col = calColor(h.color), times = habitTimes(h);
+  const lead = m.selecting ? '<button class="chk sq" data-a="hSelect" data-id="' + h.id + '" aria-pressed="' + !!ui.selected[h.id] + '" aria-label="Select ' + esc(h.name) + '"></button>'
+    : m.grip ? '<span class="grip" aria-label="Drag to reorder ' + esc(h.name) + '" role="button" tabindex="0" data-id="' + h.id + '">' + GRIP + "</span>" : "";
+  return '<div class="hrow" data-id="' + h.id + '">' + lead + '<button class="hbtn' + (full ? " full" : "") + '" style="--hc:' + esc(col) + (full ? ";color:" + inkOn(col) : "") + '" data-a="habit" data-id="' + h.id +
     '" aria-label="Check off ' + esc(h.name) + '">' + (h.icon ? esc(h.icon) : full ? "✓" : "") + (freq > 1 ? '<span class="cnt">' + n + "/" + freq + "</span>" : "") + "</button>" +
     '<div class="rt" data-a="habitOpen" data-id="' + h.id + '" role="button" tabindex="0"><div class="ti">' + esc(h.name) + '</div><div class="me">' +
-    (st.cur ? "🔥 " + st.cur + " day" + (st.cur > 1 ? "s" : "") : "Start today") + (h.remAt ? " · 🔔 " + esc(h.remAt) : "") + "</div></div>" +
+    (st.cur ? "🔥 " + st.cur + " day" + (st.cur > 1 ? "s" : "") : "Start today") + (times.length ? " · 🔔 " + esc(times.join(", ")) : "") +
+    (h.tag && !m.noTag ? ' · <span class="tag">#' + esc(h.tag) + "</span>" : "") + "</div></div>" +
     (n > 0 && freq > 1 ? '<button class="minus" data-a="habitMinus" data-id="' + h.id + '" aria-label="Undo one">−</button>' : "") + "</div>";
 };
+// Manual order, or grouped under tag headings that fold away.
+function habitList(hs, m = {}) {
+  if (ui.hSort !== "tag") return hs.map((h) => habitRow(h, m)).join("");
+  const t = today();
+  return tagGroups(hs).map((g) => '<div class="ghead" data-a="hGroup" data-v="' + esc(g.key) + '" role="button" tabindex="0" aria-expanded="' + !ui.collapsed[g.key] + '"><b>' + (g.key ? "#" + esc(g.label) : "No tag") +
+    "</b><span>" + g.tasks.filter((h) => habitDone(h, t)).length + "/" + g.tasks.length + " " + (ui.collapsed[g.key] ? "▸" : "▾") + "</span></div>" +
+    (ui.collapsed[g.key] ? "" : g.tasks.map((h) => habitRow(h, { ...m, noTag: true })).join(""))).join("");
+}
 const byAt = (a, b) => (a.at == null) - (b.at == null) || a.at - b.at || (b.pri || 0) - (a.pri || 0);
 
 function vToday() {
@@ -307,7 +408,7 @@ function vToday() {
   h += '<div class="sec">Today <span class="n">' + (cur.length || "") + "</span></div>";
   h += cur.length ? '<div class="card list">' + cur.map((x) => row(x.it, { occ: x.occ, timeOnly: true })).join("") + "</div>"
     : '<div class="card empty">' + (late.length || done.length ? "Nothing else scheduled today." : "A clear day. Add one small thing above, or let me pick.") + "</div>";
-  if (hs.length) h += '<div class="sec">Habits <span class="n">' + hd + "/" + hs.length + '</span></div><div class="card list">' + hs.map(habitRow).join("") + "</div>";
+  if (hs.length) h += '<div class="sec">Habits <span class="n">' + hd + "/" + hs.length + '</span></div><div class="card list">' + habitList(hs) + "</div>";
   if (done.length) {
     const xp = done.reduce((n, l) => n + (l.xp || 0), 0);
     h += '<div class="sec">Done today <span class="n">' + done.length + " · +" + xp + ' XP</span><button data-a="toggleDone">' + (ui.showDone ? "Hide" : "Show") + "</button></div>";
@@ -373,7 +474,7 @@ function vCal() {
     if (i >= 35 && k.slice(0, 7) !== ui.month && addDays(startK, 35).slice(0, 7) !== ui.month) break;
     if (k.slice(0, 7) !== ui.month) cls.push("out");
     if (k === t) cls.push("today");
-    if (hs.length && k <= t && hs.every((x) => habitDone(x, k))) cls.push("hab");
+    if (hs.length && k <= t && dayInfo(hs, k).full) cls.push("hab");
     if (g.frozen.has(k)) cls.push("frz");
     h += '<button class="' + cls.join(" ") + '" data-a="calSel" data-v="' + k + '" aria-pressed="' + (k === ui.sel) + '" aria-label="' + k + ", " + arr.length + ' items">' + Number(k.slice(8)) +
       '<span class="dots">' + arr.slice(0, 4).map((x) => { const L = listOf(x.it); return "<i" + (L ? ' style="background:' + esc(L.color) + '"' : "") + "></i>"; }).join("") + "</span>" +
@@ -385,32 +486,83 @@ function vCal() {
   return h;
 }
 
-function vHabits() {
-  const hs = habits(), t = today(), s = set();
-  let h = "";
-  if (!hs.length) h += '<div class="card empty" style="margin-top:8px">Habits are things you repeat daily: water, meds, a walk.<br>Each check-off adds to your streak and XP.</div>';
-  else h += '<div class="card list" style="margin-top:8px">' + hs.map(habitRow).join("") + "</div>";
-  h += '<button class="btn soft pick" data-a="habitNew">+ New habit</button>';
-  const sel = db.recs[ui.habit] && !db.recs[ui.habit].del ? db.recs[ui.habit] : hs[0];
-  if (sel) {
-    const st = habitStats(sel), [y, m] = ui.month.split("-").map(Number), first = ui.month + "-01", lead = new Date(first + "T00:00:00Z").getUTCDay();
-    const dim = new Date(Date.UTC(y, m, 0)).getUTCDate(), freq = sel.freq || 1;
-    h += '<div class="sec">Calendar</div><div class="chips scroll">' + hs.map((x) => '<button class="chip" data-a="habitSel" data-id="' + x.id + '" aria-pressed="' + (x.id === sel.id) + '">' + esc((x.icon ? x.icon + " " : "") + x.name) + "</button>").join("") + "</div>";
-    h += '<div class="stats">' + [["Current streak", st.cur], ["Best streak", st.best], ["Days done", st.days], ["Total", st.total]].map((x) => '<div class="card stat"><b>' + x[1] + "</b><span>" + x[0] + "</span></div>").join("") + "</div>";
-    h += '<div class="calhead"><h2>' + MO[m - 1] + " " + y + '</h2><button class="btn ghost sm" data-a="calNav" data-v="-1" aria-label="Previous month">‹</button><button class="btn ghost sm" data-a="calNav" data-v="1" aria-label="Next month">›</button><button class="btn ghost sm" data-a="habitEdit" data-id="' + sel.id + '">Edit</button></div>';
-    h += '<div class="grid">' + WD.map((d) => '<div class="dow">' + d + "</div>").join("") + "<span></span>".repeat(lead);
-    for (let d = 1; d <= dim; d++) {
-      const k = ui.month + "-" + pad(d), n = (sel.done || {})[k] || 0, fut = k > t;
-      const bg = n >= freq ? sel.color : n > 0 ? sel.color + "55" : "";
-      h += '<button class="hday' + (k === t ? " today" : "") + (fut ? " fut" : "") + '" ' + (fut ? "disabled" : 'data-a="habitDay" data-id="' + sel.id + '" data-v="' + k + '"') +
-        ' style="' + (bg ? "background:" + esc(bg) + ";color:#16202A" : "") + '" aria-label="' + k + ": " + n + " of " + freq + '">' + d + "</button>";
-    }
-    h += '</div><p class="hint" style="margin-top:8px">Tap a past day to fix a missed check-off. Solid means complete, pale means partly done.</p>';
+// Which habits the habit calendar is showing: all, one tag, or a single habit.
+function calPick() {
+  const all = habits();
+  if (ui.hcal.startsWith("tag:")) { const v = all.filter((h) => tagKey(h.tag) === ui.hcal.slice(4)); if (v.length) return { list: v, single: null }; }
+  else if (ui.hcal !== "all") { const h = all.find((x) => x.id === ui.hcal); if (h) return { list: [h], single: h }; }
+  ui.hcal = "all";
+  return { list: all, single: null };
+}
+function hCal() {
+  const { list, single } = calPick(), st = calStats(list), t = today(), [y, m] = ui.hmonth.split("-").map(Number);
+  const lead = new Date(ui.hmonth + "-01T00:00:00Z").getUTCDay(), dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const base = single ? calColor(single.color) : cssHex("--accent", "#12594F");
+  const chip = (id, label) => '<button class="chip" data-a="hcal" data-v="' + esc(id) + '" aria-pressed="' + (ui.hcal === id) + '">' + esc(label) + "</button>";
+  let h = '<div class="sec">Days</div><div class="chips scroll" id="hcalChips">' + chip("all", "All habits") +
+    tagGroups(habits()).map((g) => (g.key ? chip("tag:" + g.key, "#" + g.label) : "") + g.tasks.map((c) => chip(c.id, (c.icon ? c.icon + " " : "") + (c.name || "Untitled"))).join("")).join("") + "</div>";
+  h += '<div class="stats s3">' + [["Current streak", st.cur], ["Max streak", st.best], ["Days completed", st.days]].map((x) => '<div class="card stat"><b>' + x[1] + "</b><span>" + x[0] + "</span></div>").join("") + "</div>";
+  h += '<div class="tallyrow">' + marks(st.total) + "<span>" + st.total + (st.total === 1 ? " check-off" : " check-offs") + "</span></div>";
+  h += '<div class="calhead"><button class="btn ghost sm" data-a="hMonth" data-v="-1" aria-label="Previous month">‹</button><button class="mtitle" data-a="hMonth" data-v="0" aria-label="Jump to this month">' + MO[m - 1] + " " + y +
+    '</button><button class="btn ghost sm" data-a="hMonth" data-v="1" aria-label="Next month">›</button></div>';
+  h += '<div class="grid">' + WD.map((d) => '<div class="dow">' + d[0] + "</div>").join("") + "<span></span>".repeat(lead);
+  for (let d = 1; d <= dim; d++) {
+    const k = ui.hmonth + "-" + pad(d), lv = dayLevel(dayInfo(list, k)), sh = shade(base, lv);
+    h += '<button class="hday' + (k === t ? " today" : "") + '" ' + (k > t ? "disabled" : 'data-a="habitDay" data-v="' + k + '"') + (sh ? ' style="background:' + sh.bg + ";color:" + sh.ink + '"' : "") +
+      ' aria-label="' + k + (lv > 0 ? ", " + Math.round(lv * 100) + " percent done" : "") + '">' + d + "</button>";
   }
-  h += '<div class="sec">Tap counter</div><div class="card tap"><input class="in" id="tapLabel" placeholder="What are you counting?" value="' + esc(s.tap.label || "") + '" aria-label="Counter label">' +
-    '<div class="num" id="tapNum">' + (s.tap.value || 0) + '</div><button class="btn big" data-a="tap" data-v="1">Tap +1</button>' +
-    '<div class="r2"><button class="btn ghost" data-a="tap" data-v="-1">−1</button>' + (s.tap.value ? '<button class="btn ghost" data-a="tap" data-v="0">Reset</button>' : "") + "</div></div>";
+  h += "</div>";
+  if (!single || (single.freq || 1) > 1) h += '<div class="legend"><span>0%</span><i style="background:linear-gradient(90deg,' + shade(base, 0.01).bg + "," + base + ')"></i><span>100%</span></div>';
+  h += '<p class="hint" style="margin-top:8px">' + (single ? ((single.freq || 1) > 1 ? "Tap a day to add a check-off. After the last one it clears. Paler days are partly done." : "Tap a day to mark it done, tap again to clear it.")
+    : "A day gets deeper the more of its habits are done. Tap a day to see which ones.") + "</p>";
   return h;
+}
+function vHabits() {
+  const all = habits(), t = today(), o = O(), s = set(), v = s.tap.value || 0, d = loc(Date.now(), o);
+  let h = "";
+  if (!all.length) h += '<div class="card empty" style="margin-top:8px">Habits are things you repeat daily: water, meds, a walk.<br>Each check-off adds to your streak and XP.</div>';
+  else {
+    let hs = all;
+    if (ui.hFilter) { const f = all.filter((x) => tagKey(x.tag) === ui.hFilter); if (f.length) hs = f; else ui.hFilter = ""; }
+    const dn = hs.filter((x) => habitDone(x, t)).length, tags = tagGroups(all).filter((g) => g.key), nSel = Object.keys(ui.selected).length;
+    h += '<div class="card hsum"><div><b>' + WD[d.getUTCDay()] + " " + d.getUTCDate() + " " + MO[d.getUTCMonth()] + "</b><span>" + dn + " of " + hs.length + ' done</span></div><div class="bar"><i style="width:' + Math.round((100 * dn) / hs.length) + '%"></i></div></div>';
+    h += '<div class="tools">' + (ui.selecting
+      ? '<button class="btn ghost sm" data-a="hSelMode">Cancel</button><button class="btn ghost sm" data-a="hSelAll">Select all</button><span class="grow"></span><button class="btn danger sm" data-a="hSelDel"' + (nSel ? "" : " disabled") + ">Delete" + (nSel ? " " + nSel : "") + "</button>"
+      : (all.length > 1 ? '<button class="btn ghost sm" data-a="hSort" aria-label="Change sort order">Sort: ' + (ui.hSort === "tag" ? "By tag" : "Manual") + '</button><span class="grow"></span><button class="btn ghost sm" data-a="hSelMode">Select</button>' : "")) + "</div>";
+    if (tags.length) h += '<div class="chips scroll">' + [["", "All"]].concat(tags.map((g) => [g.key, "#" + g.label])).map(([k, l]) => '<button class="chip" data-a="hFilter" data-v="' + esc(k) + '" aria-pressed="' + (ui.hFilter === k) + '">' + esc(l) + "</button>").join("") + "</div>";
+    h += '<div class="card list" id="hlist">' + habitList(hs, { selecting: ui.selecting, grip: ui.hSort === "manual" && !ui.hFilter && !ui.selecting && hs.length > 1 }) + "</div>";
+  }
+  h += '<button class="btn soft pick" data-a="habitNew">+ New habit</button>';
+  if (all.length) h += hCal();
+  const ne = all_("entry").length;
+  h += '<div class="sec">Tap counter<button data-a="entries">Saved entries' + (ne ? " (" + ne + ")" : "") + '</button></div><div class="card tap"><input class="in" id="tapLabel" placeholder="What are you counting?" value="' + esc(s.tap.label || "") + '" aria-label="Counter label">' +
+    '<button class="tapzone" data-a="tap" data-v="1" aria-label="Add one"><div class="num" id="tapNum">' + v + "</div>" + marks(v) + '<div class="hint">Tap anywhere here to add one</div></button>' +
+    '<div class="r2"><button class="btn ghost" data-a="tap" data-v="-1" aria-label="Subtract one">−1</button><button class="btn" data-a="tapSave">Save</button>' + (v ? '<button class="btn ghost" data-a="tap" data-v="0">Reset</button>' : "") + "</div></div>";
+  return h;
+}
+// Day detail for the habit calendar: which habits were done that day, and a way to fix it.
+let dayK = "";
+function dayBody() {
+  const { list } = calPick(), k = dayK, info = dayInfo(list, k), here = list.filter((c) => applies(c, k));
+  const cnt = (c) => (c.done || {})[k] || 0;
+  let h = '<p class="hint">' + (!info.applicable ? "No habits on this day." : info.applicable > 1 ? info.complete + " of " + info.applicable + " habits done · " + Math.round(info.ratio * 100) + "%" : info.complete ? "Done" : "Not done") + "</p>";
+  for (const [name, arr] of [["Done", here.filter((c) => cnt(c) >= (c.freq || 1))], ["Partly done", here.filter((c) => cnt(c) > 0 && cnt(c) < (c.freq || 1))], ["Not done", here.filter((c) => !cnt(c))]]) {
+    if (!arr.length) continue;
+    h += '<div class="sec">' + name + ' <span class="n">' + arr.length + '</span></div><div class="card list">' + arr.map((c) => {
+      const n = cnt(c), f = c.freq || 1, col = calColor(c.color);
+      return '<div class="hrow" data-a="dayCycle" data-id="' + c.id + '" role="button" tabindex="0"><span class="hbtn sm' + (n >= f ? " full" : "") + '" style="--hc:' + col + (n >= f ? ";color:" + inkOn(col) : "") + '">' + (n >= f ? "✓" : n || "") + "</span>" +
+        '<div class="rt"><div class="ti">' + esc((c.icon ? c.icon + " " : "") + c.name) + "</div>" + (c.tag ? '<div class="me">#' + esc(c.tag) + "</div>" : "") + "</div>" + (f > 1 ? '<span class="hint">' + n + "/" + f + "</span>" : "") + "</div>";
+    }).join("") + "</div>";
+  }
+  return h + (here.length ? '<p class="hint" style="margin-top:10px">Tap a habit to change it for this day.</p>' : "");
+}
+// One more check-off on a day; after the last one it clears. Today earns XP, past days are just corrections.
+function cycleDay(id, k, el) {
+  const h = db.recs[id], n = (h.done || {})[k] || 0, f = h.freq || 1;
+  if (k === today()) { if (n < f) tickHabit(id, 1, el); else for (let i = 0; i < n; i++) tickHabit(id, -1); return; }
+  const dn = { ...(h.done || {}) };
+  if (n + 1 > f) delete dn[k]; else dn[k] = n + 1;
+  put({ ...h, done: dn });
 }
 
 // ---------- focus timer ----------
@@ -426,12 +578,12 @@ function vFocus() {
     '<div class="clock" id="clock">' + (running ? mmss(fo.end ? fo.end - Date.now() : fo.left) : "25:00") + "</div>";
   h += '<select class="in" id="foRef" aria-label="Task to focus on"><option value="">No specific task</option>' +
     cand.map((i) => '<option value="' + i.id + '"' + (fo && fo.ref === i.id ? " selected" : "") + ">" + esc(i.title) + "</option>").join("") + "</select>";
-  if (running) h += '<div class="r2"><button class="btn" data-a="foPause">' + (fo.end ? "Pause" : "Resume") + '</button><button class="btn ghost" data-a="foStop">Finish early</button></div>';
+  if (running) h += '<div class="r2"><button class="btn" data-a="foPause">' + (fo.end ? "Pause" : "Resume") + '</button><button class="btn ghost" data-a="foStop">Finish early</button><button class="btn ghost" data-a="foReset">Reset</button></div>';
   else h += '<div class="chips" style="justify-content:center">' + [5, 15, 25, 50].map((n) => '<button class="btn ' + (n === 5 ? "" : "ghost") + '" data-a="foStart" data-v="' + n + '">' + (n === 5 ? "Just 5 min" : n + " min") + "</button>").join("") + "</div>";
   h += "</div>";
   h += '<div class="stats" style="grid-template-columns:repeat(2,1fr)"><div class="card stat"><b>' + mins + '</b><span>Minutes focused today</span></div><div class="card stat"><b>' +
     logs().filter((l) => l.k === "focus" && dayKey(l.at, o) === t).length + "</b><span>Sessions today</span></div></div>";
-  h += '<p class="hint">Stopping early still earns XP for the minutes you did. Keep this tab open while the timer runs.</p>';
+  h += '<p class="hint">Finish early still earns XP for the minutes you did. Reset throws the session away. Keep this tab open while the timer runs.</p>';
   return h;
 }
 function foFinish(early) {
@@ -468,6 +620,7 @@ function drawTop() {
     '<button class="ib" data-a="settings" aria-label="Settings">' + ICON.gear + '<span class="dot ' + dot + '"></span></button>';
 }
 function render() {
+  if (drag) { drag.stale = true; return; }
   const main = $("#main"), a = document.activeElement, keep = a && a.id && main.contains(a) ? { id: a.id, v: a.value, s: a.selectionStart } : null, y = main.scrollTop;
   const qa = $("#qa"), qaVal = qa ? qa.value : "";
   $("#nav").innerHTML = '<div class="brand">Onward</div>' + TABS.map(([k, l]) => '<button data-a="tab" data-v="' + k + '"' + (ui.tab === k ? ' aria-current="page"' : "") + ">" + ICON[k] + "<span>" + l + "</span></button>").join("");
@@ -480,17 +633,59 @@ function render() {
 const done = () => { checkQuests(); render(); };
 
 // ================= sheets =================
+// Every pop-up, the alarm screen, select mode and leaving the Today tab add one history entry,
+// so the phone's back button undoes the top one instead of leaving the app.
+const layers = [];
+let ignorePop = 0, deferredPush = 0, popTimer = 0;
+function pushLayer(kind, undo) {
+  layers.push({ kind, undo });
+  if (ignorePop > 0) { deferredPush++; return; }
+  try { history.pushState({ layer: layers.length }, ""); } catch (e) {}
+}
+function flushPushes() {
+  clearTimeout(popTimer);
+  while (deferredPush > 0) { deferredPush--; try { history.pushState({ layer: layers.length }, ""); } catch (e) {} }
+}
+function dropLayer(kind) {
+  for (let i = layers.length - 1; i >= 0; i--) {
+    if (layers[i].kind !== kind) continue;
+    layers.splice(i, 1);
+    ignorePop++;
+    clearTimeout(popTimer);
+    popTimer = setTimeout(() => { ignorePop = 0; flushPushes(); }, 700);
+    try { history.back(); } catch (e) { ignorePop--; }
+    return;
+  }
+}
+window.addEventListener("popstate", () => {
+  if (ignorePop > 0) { ignorePop--; if (ignorePop === 0) flushPushes(); return; }
+  const l = layers.pop();
+  if (l) l.undo();
+});
+const hasLayer = (kind) => layers.some((l) => l.kind === kind);
+function setTab(tab, dir) {
+  if (tab === ui.tab) return;
+  if (tab === "today") dropLayer("tab");
+  else if (!hasLayer("tab")) pushLayer("tab", () => { ui.tab = "today"; render(); });
+  if (ui.selecting) { ui.selecting = false; ui.selected = {}; dropLayer("select"); }
+  ui.tab = tab; $("#main").scrollTop = 0; render(); $("#main").scrollTop = 0;
+  const m = $("#main");
+  m.classList.remove("fwd", "back"); void m.offsetWidth; if (dir) m.classList.add(dir);
+}
+
 let onSheetClose = null;
 function openSheet(title, body, onClose, btn) {
   $("#sheet").innerHTML = '<div class="sh" role="dialog" aria-modal="true" aria-label="' + esc(title) + '"><div class="shh"><h2>' + esc(title) +
     '</h2><button class="btn sm" data-a="closeSheet">' + (btn || "Done") + '</button></div><div class="shb">' + body + "</div></div>";
   $("#sheet").hidden = false; onSheetClose = onClose || null;
+  if (!hasLayer("sheet")) pushLayer("sheet", () => closeSheet(false, true));
   const af = $("#sheet [autofocus]"); if (af) af.focus();
 }
-function closeSheet(skip) {
+function closeSheet(skip, fromBack) {
   const f = onSheetClose; onSheetClose = null;
   if (f && !skip) f();
   $("#sheet").hidden = true; $("#sheet").innerHTML = "";
+  if (!fromBack) dropLayer("sheet");
   done();
 }
 function setBody(html) {
@@ -502,6 +697,19 @@ function setBody(html) {
 const chipBtn = (a, v, l, on, extra) => '<button class="chip" data-a="' + a + '" data-v="' + esc(v) + '" aria-pressed="' + !!on + '"' + (extra || "") + ">" + l + "</button>";
 const opts = (arr, cur) => arr.map(([v, l]) => '<option value="' + esc(v) + '"' + (String(v) === String(cur) ? " selected" : "") + ">" + esc(l) + "</option>").join("");
 const chRow = (a, cur, extra) => '<div class="chips">' + CHS.map(([c, l]) => chipBtn(a, c, l, (cur || []).includes(c), extra)).join("") + "</div>";
+
+// Plain-language reasons a chosen channel will not deliver yet, so a silent reminder is never a surprise.
+function chProblems(chs) {
+  const out = [], has = (c) => chs.includes(c);
+  if (!chs.length) return out;
+  if (!key) return ["Sync is off, so nothing can be sent while the app is closed. Only the in-app alarm will ring. Turn sync on in Settings."];
+  if (!cfg) return out;
+  if ((has("push") || has("alarm")) && !cfg.pushDevices) out.push("Push and Alarm: no device has notifications turned on yet.");
+  if (has("tg") && !cfg.tgChat) out.push("Telegram: not linked yet.");
+  if (has("email") && !(cfg.resendKey && cfg.emailTo)) out.push("Email: not set up yet.");
+  return out.length ? out.concat("Fix these in Settings (gear icon).") : out;
+}
+const warn = (chs) => { const p = chProblems(chs); return p.length ? '<p class="warn">' + p.map(esc).join("<br>") + "</p>" : ""; };
 
 // ---------- task / event editor ----------
 let ed = null;
@@ -538,7 +746,8 @@ function edBody() {
     (ed.rs === "c" ? '<div class="r2" style="margin-top:8px"><input class="in" type="number" min="1" inputmode="numeric" data-f="cn" value="' + ed.cn + '" aria-label="Every how many"><select class="in" data-f="cu" data-c="redraw" aria-label="Unit">' + opts([["d", "days"], ["w", "weeks"], ["m", "months"], ["y", "years"]], ed.cu) + "</select></div>" : "") +
     (wk ? '<div class="chips" style="margin-top:8px">' + WD.map((d, i) => chipBtn("edWd", i, d, ed.days.includes(i))).join("") + "</div>" : "") + "</div>" +
     '<div class="f"><label>Reminders</label>' + it.rem.map(remRow).join("") + '<button class="btn soft sm" data-a="remAdd">+ Add reminder</button>' +
-    (it.rem.some((r) => r.at == null) && !ed.dk ? '<p class="hint" style="margin-top:6px">Pick a date above, or these reminders have nothing to count from.</p>' : "") + "</div>" +
+    (it.rem.some((r) => r.at == null) && !ed.dk ? '<p class="hint" style="margin-top:6px">Pick a date above, or these reminders have nothing to count from.</p>' : "") +
+    warn([...new Set(it.rem.flatMap((r) => r.ch))]) + "</div>" +
     (ev ? "" : '<div class="f"><label>If I ignore it</label><select class="in" data-f="nag" aria-label="Keep nudging">' + opts([[0, "Remind once"], [5, "Nudge every 5 min until done (up to 5 times)"], [10, "Nudge every 10 min until done (up to 5 times)"], [30, "Nudge every 30 min until done (up to 5 times)"]], it.nag || 0) + "</select></div>") +
     '<div class="f r2"><div><span class="lab">List</span><select class="in" data-f="list" aria-label="List">' + opts([["", "Inbox"]].concat(lists().map((l) => [l.id, l.name])), it.list) + "</select></div>" +
     '<div><span class="lab">Takes about</span><select class="in" data-f="est" aria-label="Estimate">' + opts([[0, "Not sure"], [5, "5 min"], [15, "15 min"], [30, "30 min"], [60, "1 hour"], [120, "2 hours"], [240, "Half a day"]], it.est || 0) + "</select></div></div>" +
@@ -597,32 +806,51 @@ function saveEd() {
 let hd = null;
 function editHabit(id) {
   const ex = id && db.recs[id];
-  hd = ex ? JSON.parse(JSON.stringify(ex)) : { id: uid(), type: "habit", name: "", icon: "", color: COLORS[habits().length % COLORS.length], freq: 1, done: {}, remAt: "", remCh: [...set().defCh], ord: Date.now(), created: Date.now(), isNew: 1 };
+  hd = ex ? JSON.parse(JSON.stringify(ex)) : { id: uid(), type: "habit", name: "", icon: "", tag: ui.hFilter ? (habits().find((h) => tagKey(h.tag) === ui.hFilter) || {}).tag || "" : "",
+    color: PAL[0][1][habits().length % PAL[0][1].length], freq: 1, done: {}, remCh: [...set().defCh], ord: Date.now(), created: Date.now(), isNew: 1 };
+  hd.rems = habitTimes(hd); delete hd.remAt;
   openSheet(ex ? "Edit habit" : "New habit", hdBody(), saveHabit, "Save");
 }
-const swatches = (a, cur) => '<div class="sw">' + COLORS.map((c) => '<button data-a="' + a + '" data-v="' + c + '" style="background:' + c + '" aria-pressed="' + (c === cur) + '" aria-label="Colour ' + c + '"></button>').join("") + "</div>";
+const sugHtml = () => suggestIcons(hd.name).filter((e) => e !== hd.icon).map((e) => '<button class="emo" data-a="hdIcon" data-v="' + e + '" aria-label="Use ' + e + '">' + e + "</button>").join("");
 function hdBody() {
-  return '<input class="in title" data-f="name" placeholder="e.g. Drink water" value="' + esc(hd.name) + '"' + (hd.isNew ? " autofocus" : "") + ">" +
-    '<div class="f r2"><div><span class="lab">Icon (emoji)</span><input class="in" data-f="icon" maxlength="4" value="' + esc(hd.icon || "") + '" placeholder="💧"></div>' +
-    '<div><span class="lab">Times per day</span><input class="in" type="number" min="1" max="50" inputmode="numeric" data-f="freq" value="' + (hd.freq || 1) + '"></div></div>' +
+  const freq = hd.freq || 1, tags = tagGroups(habits()).filter((g) => g.key && g.key !== tagKey(hd.tag)).map((g) => g.label);
+  return '<input class="in title" data-f="name" id="hdName" placeholder="e.g. Drink water" value="' + esc(hd.name) + '"' + (hd.isNew ? " autofocus" : "") + ">" +
+    '<div class="f"><label>Icon</label><div class="iconrow"><input class="in icn" data-f="icon" maxlength="8" value="' + esc(hd.icon || "") + '" placeholder="🙂" aria-label="Icon, one emoji"><span id="hdSug">' + sugHtml() +
+    '</span><button class="btn ghost sm" data-a="hdEmoji">' + (hd._em ? "Fewer" : "More") + "</button></div>" +
+    (hd._em ? EMOJI_GROUPS.map(([n, list]) => '<div class="swl">' + n + '</div><div class="emojis">' + list.split(" ").map((e) => '<button class="emo" data-a="hdIcon" data-v="' + e + '" aria-label="Use ' + e + '">' + e + "</button>").join("") + "</div>").join("") : "") + "</div>" +
+    '<div class="f"><label>Tag</label><input class="in" data-f="tag" autocomplete="off" placeholder="e.g. health, study" value="' + esc(hd.tag || "") + '" aria-label="Tag">' +
+    (tags.length ? '<div class="chips" style="margin-top:8px">' + tags.map((t) => '<button class="chip" data-a="hdTag" data-v="' + esc(t) + '">#' + esc(t) + "</button>").join("") + "</div>" : "") + "</div>" +
+    '<div class="f"><label>Times per day</label><div class="stepper"><button data-a="hdFreq" data-v="-1" aria-label="Fewer times">−</button><b>' + freq + '</b><button data-a="hdFreq" data-v="1" aria-label="More times">+</button><span class="hint">' +
+    (freq === 1 ? "Once a day" : "Tap " + freq + " times to finish the day") + "</span></div></div>" +
     '<div class="f"><label>Colour</label>' + swatches("hdColor", hd.color) + "</div>" +
-    '<div class="f"><label>Daily reminder</label><input class="in" type="time" data-f="remAt" value="' + esc(hd.remAt || "") + '" aria-label="Reminder time, empty for none"><div style="height:8px"></div>' + chRow("hdCh", hd.remCh) +
-    '<p class="hint" style="margin-top:6px">Leave the time empty for no reminder. It is skipped on days you have already finished.</p></div>' +
+    '<div class="f"><label>Reminders</label>' + hd.rems.map((t, i) => '<div class="r2" style="margin-bottom:8px;align-items:center"><input class="in" type="time" data-f="rem" data-i="' + i + '" value="' + esc(t) + '" aria-label="Reminder ' + (i + 1) +
+      '"><button class="x" data-a="hdRemDel" data-i="' + i + '" aria-label="Remove reminder ' + (i + 1) + '">×</button></div>').join("") +
+    (hd.rems.length < freq ? '<button class="btn soft sm" data-a="hdRemAdd">+ Add reminder time</button>' : "") +
+    '<p class="hint" style="margin:6px 0 8px">' + (freq === 1 ? "One reminder a day." : "Up to " + freq + " reminders, one for each time.") + " A reminder is skipped once you are already that far along for the day.</p>" +
+    (hd.rems.length ? chRow("hdCh", hd.remCh) + warn(hd.remCh || []) : "") + "</div>" +
     '<div class="f r2"><button class="btn" data-a="closeSheet">Save</button>' + (hd.isNew ? '<button class="btn ghost" data-a="cancelSheet">Cancel</button>' : '<button class="btn danger" data-a="hdDel">Delete</button>') + "</div>" +
-    (hd.isNew ? "" : '<div class="f r2"><button class="btn ghost sm" data-a="hdMove" data-v="-1">Move up</button><button class="btn ghost sm" data-a="hdMove" data-v="1">Move down</button></div>');
+    (hd.isNew ? "" : '<div class="f r2"><button class="btn ghost sm" data-a="hdClear">Clear today</button><button class="btn ghost sm" data-a="hdMove" data-v="-1">Move up</button><button class="btn ghost sm" data-a="hdMove" data-v="1">Move down</button></div>');
 }
 function readHd() {
   if (!hd) return;
-  for (const el of $$("#sheet [data-f]")) hd[el.dataset.f] = el.dataset.f === "freq" ? Math.min(50, Math.max(1, Math.floor(+el.value) || 1)) : el.value.trim();
+  for (const el of $$("#sheet [data-f]")) {
+    const f = el.dataset.f, v = el.value.trim();
+    if (f === "rem") hd.rems[+el.dataset.i] = v; else if (f === "icon") hd.icon = firstGrapheme(v); else hd[f] = v;
+  }
 }
 function saveHabit() {
   if (!hd) return;
   readHd();
   const h = hd; hd = null;
   if (!h.name) return;
-  delete h.isNew;
-  put(h); ui.habit = h.id;
+  if (h.isNew && !h.icon && !h._iconSet) h.icon = suggestIcons(h.name)[0] || "";
+  h.rems = h.rems.filter(Boolean).sort().slice(0, h.freq || 1);
+  delete h.isNew; delete h._em; delete h._iconSet;
+  put(h);
 }
+const swatches = (a, cur) => PAL.map(([name, cols]) => '<div class="swl">' + name + '</div><div class="sw">' + cols.map((c) => '<button data-a="' + a + '" data-v="' + c + '" style="background:' + c +
+  '" aria-pressed="' + (c.toLowerCase() === String(cur).toLowerCase()) + '" aria-label="' + name + " colour " + c + '"></button>').join("") + "</div>").join("") +
+  '<label class="custom"><input type="color" data-c="' + a + '" value="' + (/^#[0-9a-f]{6}$/i.test(cur) ? cur : "#71C0B6") + '" aria-label="Custom colour"><span class="hint">or pick your own</span></label>';
 let ld = null;
 function editList(id) {
   const ex = id && db.recs[id];
@@ -662,12 +890,30 @@ function pickOne() {
 // ---------- settings ----------
 let cfg = null;
 const sMsg = (id, text, cls) => { const el = document.getElementById(id); if (el) { el.textContent = text; el.className = "msg " + (cls || ""); } };
+function statusHtml() {
+  if (!key) return '<div class="card grp st"><b>Reminder status</b><p class="warn">Sync is off. The server does not know about your reminders, so push, Telegram and email cannot be sent. Only the in-app alarm rings, and only while the app is open.</p></div>';
+  const c = cfg;
+  if (!c) return '<div class="card grp st"><b>Reminder status</b><p class="hint">Checking the server…</p></div>';
+  const o = O(), ago = (ts) => { const sec = Math.max(0, Math.round((c.now - ts) / 1000)); return sec < 90 ? sec + " s ago" : sec < 5400 ? Math.round(sec / 60) + " min ago" : Math.round(sec / 3600) + " h ago"; };
+  const ok = (good, text) => '<div class="ln"><span class="' + (good ? "good" : "bad") + '">' + (good ? "✓" : "✗") + "</span>" + text + "</div>";
+  const names = { push: "Push", alarm: "Alarm", tg: "Telegram", email: "Email", error: "Error" };
+  let h = '<div class="card grp st"><b>Reminder status</b>' +
+    ok(c.lastTick && c.now - c.lastTick < 3 * MIN, c.lastTick ? "Reminder clock last ran " + ago(c.lastTick) + (c.now - c.lastTick < 3 * MIN ? "" : ". It should run every minute.") : "Reminder clock has never run. In Cloudflare, open the Worker > Settings > Trigger Events and check a Cron Trigger (* * * * *) is listed.") +
+    ok(c.pushDevices > 0, "Push and Alarm: " + (c.pushDevices ? c.pushDevices + " device" + (c.pushDevices === 1 ? "" : "s") + " registered" : "no device registered. Tap “Turn on push + alarm here” below.")) +
+    ok(c.tgChat, "Telegram: " + (c.tgChat ? "linked" : c.tgToken ? "token saved, chat not linked" : "not set up")) +
+    ok(c.resendKey && c.emailTo, "Email: " + (c.resendKey && c.emailTo ? "set to " + esc(c.emailTo) : "not set up")) +
+    '<div class="ln"><span>•</span>' + c.queued + " reminder" + (c.queued === 1 ? "" : "s") + " queued" + (c.nextFire ? ", next " + fmtDay(c.nextFire, o, c.now) + " " + fmtTime(c.nextFire, o) : "") + "</div>";
+  if ((c.sendLog || []).length) h += '<div class="swl">Recent deliveries</div>' + c.sendLog.map((l) => '<div class="ln sm"><span>' + fmtTime(l.at, o) + "</span><div><b>" + esc(l.title) + "</b><br>" +
+    Object.keys(l.res || {}).map((k) => '<span class="' + (l.res[k] ? "bad" : "good") + '">' + (names[k] || k) + (l.res[k] ? " failed: " + esc(l.res[k]) : " sent") + "</span>").join("<br>") + "</div></div>").join("");
+  return h + '<button class="btn ghost sm" style="margin-top:10px" data-a="cfgRefresh">Refresh</button></div>';
+}
+async function loadCfg() { if (!key) { cfg = null; return; } try { cfg = await api("/api/config"); } catch (e) {} }
 function settingsBody() {
   const s = set(), perm = "Notification" in window ? Notification.permission : "unsupported";
   const c = cfg || {};
-  return '<details class="card grp"' + (key ? "" : " open") + "><summary>Sync between devices " + (key ? (dot === "err" ? "· key rejected" : "· connected") : "· off") + "</summary>" +
+  return statusHtml() + '<details class="card grp"' + (key ? "" : " open") + "><summary>Sync between devices " + (key ? (dot === "err" ? "· key rejected" : "· connected") : "· off") + "</summary>" +
     '<p class="hint">Type the same key (your APP_KEY secret from Cloudflare) on your phone and laptop. Reminders need this to be on.</p>' +
-    '<div class="r2" style="margin-top:8px"><input class="in" id="sKey" type="password" autocomplete="off" placeholder="Sync key" value="' + esc(key) + '"><button class="btn" style="flex:none" data-a="sKey">Save</button></div><div class="msg" id="mKey"></div></details>' +
+    '<div class="r2" style="margin-top:8px"><input class="in" id="sKey" type="password" autocomplete="off" placeholder="Sync key" value="' + esc(key) + '"><button class="btn" style="flex:none" data-a="sKey">Save</button></div>' + (key ? '<div class="r2" style="margin-top:8px"><button class="btn ghost sm" data-a="syncNow">Sync now</button><button class="btn ghost sm" data-a="syncOff">Disconnect</button></div>' : "") + '<div class="msg" id="mKey"></div></details>' +
 
     '<details class="card grp" open><summary>Notifications on this device</summary>' +
     '<p class="hint">' + (perm === "granted" ? "Allowed in this browser." : perm === "denied" ? "Blocked. Allow notifications for this site in your browser settings, then come back." : perm === "unsupported" ? "This browser cannot show notifications." : "Not turned on yet.") +
@@ -705,12 +951,12 @@ function settingsBody() {
     '<p class="hint" style="margin-top:12px">Or, if the old app never used sync: open it on your laptop, press F12, paste <code>copy(localStorage.getItem("tallyCounter.v1"))</code> into the Console, then paste the result here.</p>' +
     '<textarea class="in" id="sTj" style="margin-top:8px" placeholder="Paste tally data"></textarea><button class="btn ghost" style="margin-top:8px" data-a="tallyPaste">Import pasted data</button><div class="msg" id="mTally"></div></details>' +
 
-    '<details class="card grp"><summary>Backup</summary><div class="r2"><button class="btn ghost" data-a="exportData">Download backup</button><label class="btn ghost" style="cursor:pointer">Restore backup<input type="file" id="sFile" accept="application/json,.json" hidden></label></div><div class="msg" id="mBak"></div></details>';
+    '<details class="card grp"><summary>Backup</summary><div class="r2"><button class="btn ghost" data-a="exportData">Download backup</button><label class="btn ghost" style="cursor:pointer">Restore backup<input type="file" id="sFile" accept="application/json,.json" hidden></label></div><button class="btn danger sm" style="margin-top:12px" data-a="erase">Erase everything</button><div class="msg" id="mBak"></div></details>';
 }
 async function openSettings() {
   openSheet("Settings", settingsBody(), null, "Close");
-  if (!key) return;
-  try { cfg = await api("/api/config"); if (!$("#sheet").hidden && $("#sKey")) setBody(settingsBody()); } catch (e) {}
+  await loadCfg();
+  if (!$("#sheet").hidden && $("#sKey")) setBody(settingsBody());
 }
 function b64ToU8(s) { const b = atob(s.replace(/-/g, "+").replace(/_/g, "/")); return Uint8Array.from(b, (c) => c.charCodeAt(0)); }
 async function pushOn() {
@@ -727,6 +973,12 @@ async function pushOn() {
     sMsg("mPush", "On. Tap “🔔 Push” below to send yourself a test.", "ok");
   } catch (e) { sMsg("mPush", "Could not turn on: " + e.message, "bad"); }
 }
+function entriesBody() {
+  const es = all("entry").sort((a, b) => b.at - a.at), o = O();
+  if (!es.length) return '<div class="empty">Nothing saved yet. Use Save on the tap counter to keep a count here.</div>';
+  return '<div class="card list">' + es.map((e) => '<div class="hrow"><div class="rt"><div class="ti">' + esc(e.name) + '</div><div class="me">' + fmtDay(e.at, o, Date.now()) + ", " + fmtTime(e.at, o) + (e.detail ? " · " + esc(e.detail) : "") +
+    '</div></div><b style="font-size:20px">' + e.total + '</b><button class="x" data-a="entryDel" data-id="' + e.id + '" aria-label="Delete entry">×</button></div>').join("") + "</div>";
+}
 function importTally(d) {
   if (!d || !Array.isArray(d.counters)) throw new Error("That is not tally counter data.");
   let total = 0;
@@ -740,8 +992,12 @@ function importTally(d) {
       if (n > 0) { dn[k] = Math.max(dn[k] || 0, Math.min(n, 999)); total += n; }
     }
     put({ id, type: "habit", name: String(c.name || "Untitled"), tag: String(c.tag || ""), color: /^#[0-9a-f]{3,8}$/i.test(c.color || "") ? c.color : COLORS[4],
-      icon: String(c.icon || "").slice(0, 8), freq, done: dn, remAt: ex ? ex.remAt : "", remCh: ex ? ex.remCh : [], ord: ex ? ex.ord : base + i, created: Date.parse(c.createdAt) || Date.now() });
+      icon: firstGrapheme(c.icon === undefined ? suggestIcons(c.name)[0] || "" : c.icon), freq, done: dn, rems: ex ? habitTimes(ex) : [], remCh: ex ? ex.remCh : [], ord: ex ? ex.ord : base + i, created: Date.parse(c.createdAt) || Date.now() });
   });
+  for (const e of Array.isArray(d.log) ? d.log : []) { // the old app's "Saved entries"
+    const id = "te-" + String(e.id || "");
+    if (e.id && !db.recs[id]) put({ id, type: "entry", name: String(e.name || "Count"), total: +e.total || 0, detail: String(e.detail || ""), at: Date.parse(e.at) || Date.now() });
+  }
   if (d.tap && +d.tap.value > 0) { const s = set(); put({ ...s, tap: { label: s.tap.label || String(d.tap.label || ""), value: Math.max(s.tap.value || 0, +d.tap.value) } }); }
   if (total && !db.recs["l-tally-import"]) put({ id: "l-tally-import", type: "log", k: "bonus", title: "Brought over tally history", at: Date.now(), xp: Math.min(3000, total * 5) });
   return d.counters.length;
@@ -807,21 +1063,22 @@ function ring(rec) {
   $("#ring").innerHTML = '<div class="bell">⏰</div><h2>' + esc(rec.title || rec.name) + "</h2><p>" + esc(rec.type === "habit" ? "Habit check-in" : fmtWhen(rec, o, Date.now())) + (rec.step ? "<br>First step: " + esc(rec.step) : "") + "</p>" +
     (rec.kind === "event" ? "" : '<button class="btn" data-a="ringDone">Done ✓</button>') + '' + (rec.type === "item" ? '<button class="btn alt" data-a="ringSnooze">Snooze 10 min</button>' : "") + '<button class="btn alt" data-a="ringStop">Dismiss</button>';
   $("#ring").hidden = false;
+  if (!hasLayer("ring")) pushLayer("ring", () => ringStop(true));
   clearInterval(ringT);
   const buzz = () => { beep([880, 880, 1175, 880], 0.16); if (navigator.vibrate) navigator.vibrate([400, 150, 400]); };
   buzz(); ringT = setInterval(buzz, 1500);
   setTimeout(() => { if (ringRec === rec) clearInterval(ringT); }, 5 * MIN);
 }
-function ringStop() { clearInterval(ringT); ringRec = null; $("#ring").hidden = true; if (navigator.vibrate) navigator.vibrate(0); }
+function ringStop(fromBack) { clearInterval(ringT); ringRec = null; $("#ring").hidden = true; if (navigator.vibrate) navigator.vibrate(0); if (fromBack !== true) dropLayer("ring"); }
 // While the app is open, an "alarm" reminder rings here even with no internet.
 function checkAlarms() {
   const now = Date.now(), s = set();
   let rung = {};
   try { rung = JSON.parse(sessionStorage.getItem("onward.rung")) || {}; } catch (e) {}
   for (const r of [...items(), ...habits()]) {
-    if (r.type === "habit" && habitDone(r, today())) continue;
     for (const f of fires(r, s, now)) {
-      const k = f.key + f.at;
+      const k = f.key + f.at, hi = /:h(\d+)$/.exec(f.key);
+      if (hi && ((r.done || {})[today()] || 0) >= habitNeed(r, +hi[1])) continue;
       if (f.ch.includes("alarm") && f.at <= now && !rung[k]) { rung[k] = 1; try { sessionStorage.setItem("onward.rung", JSON.stringify(rung)); } catch (e) {} ring(r); return; }
     }
   }
@@ -829,7 +1086,7 @@ function checkAlarms() {
 
 // ================= event handlers =================
 const A = {
-  tab(el) { ui.tab = el.dataset.v; $("#main").scrollTop = 0; render(); $("#main").scrollTop = 0; },
+  tab(el) { setTab(el.dataset.v); },
   settings: () => openSettings(),
   closeSheet: () => closeSheet(),
   cancelSheet() { ed = hd = ld = null; closeSheet(true); },
@@ -845,7 +1102,7 @@ const A = {
     beep([660]); done(); $("#qa").focus();
   },
   pick: () => pickOne(),
-  pickFocus(el) { closeSheet(true); fo = { ref: el.dataset.id, min: 5, end: Date.now() + 5 * MIN }; saveFo(); ui.tab = "focus"; render(); },
+  pickFocus(el) { closeSheet(true); fo = { ref: el.dataset.id, min: 5, end: Date.now() + 5 * MIN }; saveFo(); setTab("focus", "fwd"); },
   pickDone(el) { closeSheet(true); toggleTask(el.dataset.id, null); done(); },
   questOpen(el) { const p = quest().picks[+el.dataset.i], r = p && db.recs[p.ref]; if (!r || r.del) return; if (p.t === "habit") { tickHabit(r.id, 1, el); done(); } else editItem(r.id); },
   lateToday() {
@@ -860,7 +1117,7 @@ const A = {
   filter(el) { ui.filter = el.dataset.v; render(); },
   listNew: () => editList(),
   listEdit: (el) => editList(el.dataset.id),
-  ldColor(el) { ld.name = $("#sheet [data-f=name]").value; ld.color = el.dataset.v; setBody(ld.body()); },
+  ldColor(el) { ld.name = $("#sheet [data-f=name]").value; ld.color = el.dataset.v || el.value; setBody(ld.body()); },
   ldDel() { const id = ld.id; ld = null; closeSheet(true); for (const i of items()) if (i.list === id) put({ ...i, list: "" }); del(id); ui.filter = "inbox"; done(); },
   calNav(el) {
     const v = +el.dataset.v, t = today();
@@ -874,17 +1131,52 @@ const A = {
   calAdd(el) { editItem(null, { kind: "event", at: keyTs(el.dataset.v, O()) }); },
   habit(el) { tickHabit(el.dataset.id, 1, el); done(); },
   habitMinus(el) { tickHabit(el.dataset.id, -1); done(); },
-  habitOpen(el) { ui.habit = el.dataset.id; if (ui.tab !== "habits") { ui.tab = "habits"; ui.month = today().slice(0, 7); } render(); },
-  habitSel(el) { ui.habit = el.dataset.id; render(); },
+  habitOpen(el) { if (ui.selecting) return A.hSelect(el); if (ui.tab === "habits") return editHabit(el.dataset.id); ui.hcal = el.dataset.id; ui.hmonth = today().slice(0, 7); setTab("habits", "fwd"); },
+  hcal(el) { ui.hcal = el.dataset.v; render(); },
+  hMonth(el) { const v = +el.dataset.v, [y, m] = ui.hmonth.split("-").map(Number); ui.hmonth = v ? new Date(Date.UTC(y, m - 1 + v, 1)).toISOString().slice(0, 7) : today().slice(0, 7); render(); },
+  hSort() { ui.hSort = ui.hSort === "tag" ? "manual" : "tag"; lsSet("onward.hsort", ui.hSort); render(); },
+  hFilter(el) { ui.hFilter = el.dataset.v; render(); },
+  hGroup(el) { const k = el.dataset.v; ui.collapsed[k] = !ui.collapsed[k]; render(); },
+  hSelMode() { ui.selecting = !ui.selecting; ui.selected = {}; if (ui.selecting) pushLayer("select", () => { ui.selecting = false; ui.selected = {}; render(); }); else dropLayer("select"); render(); },
+  hSelect(el) { const id = el.dataset.id; if (ui.selected[id]) delete ui.selected[id]; else ui.selected[id] = 1; render(); },
+  hSelAll() { const hs = habits().filter((h) => !ui.hFilter || tagKey(h.tag) === ui.hFilter), allOn = hs.every((h) => ui.selected[h.id]); ui.selected = {}; if (!allOn) for (const h of hs) ui.selected[h.id] = 1; render(); },
+  hSelDel() {
+    const prev = Object.keys(ui.selected).map((id) => db.recs[id]).filter(Boolean);
+    for (const h of prev) del(h.id);
+    ui.selecting = false; ui.selected = {}; dropLayer("select");
+    toast("Deleted " + prev.length + (prev.length === 1 ? " habit." : " habits."), () => { for (const h of prev) put({ ...h, del: 0 }); });
+    done();
+  },
+  dayCycle(el) { cycleDay(el.dataset.id, dayK, el); checkQuests(); setBody(dayBody()); },
+  tapSave() {
+    const s = set();
+    openSheet("Save this count", '<input class="in title" id="eName" placeholder="Entry name" value="' + esc(s.tap.label || "") + '" autofocus><p class="hint" style="margin-top:8px">Count: ' + (s.tap.value || 0) +
+      '</p><div class="f r2"><button class="btn ghost" data-a="tapSaveGo" data-v="0">Save</button><button class="btn" data-a="tapSaveGo" data-v="1">Save and reset</button></div>', null, "Cancel");
+  },
+  tapSaveGo(el) {
+    const s = set(), name = $("#eName").value.trim() || s.tap.label || "Count";
+    put({ id: "e" + uid(), type: "entry", name, total: s.tap.value || 0, at: Date.now() });
+    if (el.dataset.v === "1") put({ ...s, tap: { ...s.tap, value: 0 } });
+    closeSheet(true); toast("Saved “" + name + "”.");
+  },
+  entries() { openSheet("Saved entries", entriesBody(), null, "Close"); },
+  entryDel(el) { del(el.dataset.id); setBody(entriesBody()); },
   habitNew: () => editHabit(),
   habitEdit: (el) => editHabit(el.dataset.id),
   habitDay(el) {
-    const h = db.recs[el.dataset.id], k = el.dataset.v, dn = { ...(h.done || {}) }, n = (dn[k] || 0) + 1;
-    if (k === today()) { tickHabit(h.id, (dn[k] || 0) >= (h.freq || 1) ? -1 : 1, el); return done(); }
-    if (n > (h.freq || 1)) delete dn[k]; else dn[k] = n;
-    put({ ...h, done: dn }); done();
+    const { single } = calPick(), k = el.dataset.v;
+    if (single) { cycleDay(single.id, k, el); return done(); }
+    dayK = k;
+    openSheet(fmtDay(keyTs(k, O()), O(), Date.now()), dayBody(), null, "Close");
   },
-  hdColor(el) { readHd(); hd.color = el.dataset.v; setBody(hdBody()); },
+  hdColor(el) { readHd(); hd.color = el.dataset.v || el.value; setBody(hdBody()); },
+  hdIcon(el) { readHd(); hd.icon = el.dataset.v; hd._iconSet = 1; setBody(hdBody()); },
+  hdEmoji() { readHd(); hd._em = !hd._em; setBody(hdBody()); },
+  hdTag(el) { readHd(); hd.tag = el.dataset.v; setBody(hdBody()); },
+  hdFreq(el) { readHd(); hd.freq = Math.min(50, Math.max(1, (hd.freq || 1) + +el.dataset.v)); hd.rems = hd.rems.slice(0, hd.freq); setBody(hdBody()); },
+  hdRemAdd() { readHd(); const last = hd.rems[hd.rems.length - 1], h = last ? Math.min(23, +last.split(":")[0] + 3) : 9; hd.rems.push(pad(h) + ":00"); if (!(hd.remCh || []).length) hd.remCh = ["push"]; setBody(hdBody()); },
+  hdRemDel(el) { readHd(); hd.rems.splice(+el.dataset.i, 1); setBody(hdBody()); },
+  hdClear() { const id = hd.id, n = (db.recs[id].done || {})[today()] || 0; for (let i = 0; i < n; i++) tickHabit(id, -1); hd.done = { ...(db.recs[id].done || {}) }; toast(n ? "Today cleared for this habit." : "Nothing to clear today."); },
   hdCh(el) { readHd(); const c = el.dataset.v; hd.remCh = (hd.remCh || []).includes(c) ? hd.remCh.filter((x) => x !== c) : [...(hd.remCh || []), c]; setBody(hdBody()); },
   hdDel() { const id = hd.id; hd = null; closeSheet(true); del(id); done(); },
   hdMove(el) {
@@ -892,7 +1184,7 @@ const A = {
     const hs = habits(), i = hs.findIndex((h) => h.id === hd.id), j = i + +el.dataset.v;
     if (i < 0 || j < 0 || j >= hs.length) return;
     [hs[i], hs[j]] = [hs[j], hs[i]];
-    hs.forEach((h, n) => { if (h.id === hd.id) hd.ord = n; else if (h.ord !== n) put({ ...h, ord: n }); });
+    hs.forEach((h, n) => { if (h.id === hd.id) hd.ord = n; else if (h.ord !== n) put({ ...db.recs[h.id], ord: n }); });
     toast("Moved.");
   },
   tap(el) {
@@ -904,6 +1196,7 @@ const A = {
   foStart(el) { fo = { ref: $("#foRef").value, min: +el.dataset.v, end: Date.now() + +el.dataset.v * MIN }; saveFo(); beep([523]); render(); },
   foPause() { if (fo.end) { fo.left = fo.end - Date.now(); fo.end = 0; } else { fo.end = Date.now() + fo.left; fo.left = 0; } saveFo(); render(); },
   foStop: () => foFinish(true),
+  foReset() { fo = fo && fo.ref ? { ref: fo.ref } : null; saveFo(); document.title = "Onward"; toast("Timer reset. Nothing was logged."); render(); },
   // editor
   edKind(el) { readForm(); ed.it.kind = el.dataset.v; setBody(edBody()); },
   edDk(el) { readForm(); ed.dk = el.dataset.v; if (!ed.dk) ed.tm = ""; setBody(edBody()); },
@@ -938,11 +1231,19 @@ const A = {
       cfg = await api("/api/config"); setBody(settingsBody());
     } catch (e) { setDot("err"); sMsg("mKey", e.status === 401 ? "That key was not accepted." : e.message, "bad"); }
   },
-  pushOn: () => pushOn(),
+  pushOn: () => pushOn().then(loadCfg),
+  async cfgRefresh() { await sync(); await loadCfg(); if ($("#sKey")) setBody(settingsBody()); },
+  async syncNow() { sMsg("mKey", "Syncing…"); await sync(); sMsg("mKey", dot === "on" ? "Up to date." : "Could not reach the server.", dot === "on" ? "ok" : "bad"); },
+  syncOff() { key = ""; lsSet("onward.key", ""); cfg = null; setDot(""); setBody(settingsBody()); sMsg("mKey", "Disconnected. Your data stays on this device.", ""); },
+  erase(el) {
+    if (!el.dataset.armed) { el.dataset.armed = "1"; el.textContent = "Tap again to erase everything, on every synced device"; return; }
+    for (const r of Object.values(db.recs)) if (!r.del) del(r.id);
+    fo = null; saveFo(); closeSheet(true); toast("Everything was erased.");
+  },
   async test(el) {
     if (!key) return sMsg("mTest", "Connect sync first.", "bad");
     sMsg("mTest", "Sending…");
-    try { const r = await api("/api/test", { ch: el.dataset.v }); sMsg("mTest", r.error ? "Did not send: " + r.error : "Sent. It should arrive within a few seconds.", r.error ? "bad" : "ok"); }
+    try { const r = await api("/api/test", { ch: el.dataset.v }); sMsg("mTest", r.error ? "Did not send: " + r.error : "Sent. It should arrive within a few seconds.", r.error ? "bad" : "ok"); loadCfg(); }
     catch (e) { sMsg("mTest", e.message, "bad"); }
   },
   async tgSave() {
@@ -976,6 +1277,8 @@ const A = {
   },
 };
 const C = {
+  hdColor: (el) => A.hdColor(el),
+  ldColor: (el) => A.ldColor(el),
   redraw() { readForm(); setBody(edBody()); },
   remWhen(el) {
     readForm();
@@ -1012,23 +1315,83 @@ document.addEventListener("change", (e) => {
 document.addEventListener("input", (e) => {
   if (e.target.id === "qa") $("#qap").textContent = quickPreview(e.target.value);
   if (e.target.id === "q") { ui.q = e.target.value; render(); }
+  if (e.target.id === "hdName" && hd) { hd.name = e.target.value; $("#hdSug").innerHTML = sugHtml(); }
 });
 document.addEventListener("keydown", (e) => {
   const el = e.target;
   if (e.key === "Enter" && el.id === "qa") { e.preventDefault(); A.qaAdd(); }
   else if (e.key === "Enter" && el.id === "subNew") { e.preventDefault(); A.subAdd(); }
-  else if (e.key === "Enter" && el.dataset && el.dataset.f === "title") { e.preventDefault(); closeSheet(); }
+  else if (e.key === "Enter" && (el.id === "hdName" || (el.dataset && el.dataset.f === "title"))) { e.preventDefault(); closeSheet(); }
+  else if (e.key === "Enter" && el.id === "eName") { e.preventDefault(); A.tapSaveGo({ dataset: { v: "0" } }); }
+  else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && el.classList && el.classList.contains("grip")) { e.preventDefault(); moveHabit(el.dataset.id, e.key === "ArrowUp" ? -1 : 1); }
   else if ((e.key === "Enter" || e.key === " ") && el.getAttribute && el.getAttribute("role") === "button") { e.preventDefault(); el.click(); }
   else if (e.key === "Escape" && !$("#sheet").hidden) closeSheet();
   else if ((e.key === "n" || e.key === "/") && !/INPUT|TEXTAREA|SELECT/.test(el.tagName) && $("#sheet").hidden && $("#qa")) { e.preventDefault(); $("#qa").focus(); }
 });
+
+// ---------- drag a habit by its grip to reorder ----------
+let drag = null;
+function commitOrder(ids) { ids.forEach((id, n) => { const h = db.recs[id]; if (h && h.ord !== n) put({ ...h, ord: n }); }); }
+function moveHabit(id, d) {
+  const ids = habits().map((h) => h.id), i = ids.indexOf(id), j = i + d;
+  if (i < 0 || j < 0 || j >= ids.length) return;
+  [ids[i], ids[j]] = [ids[j], ids[i]]; commitOrder(ids); render();
+  const g = $('.grip[data-id="' + id + '"]'); if (g) g.focus();
+}
+document.addEventListener("pointerdown", (e) => {
+  const g = e.target.closest && e.target.closest(".grip");
+  if (!g || drag) return;
+  e.preventDefault();
+  const row = g.closest(".hrow");
+  try { g.setPointerCapture(e.pointerId); } catch (err) {}
+  drag = { row, y: e.clientY, pid: e.pointerId };
+  row.classList.add("dragging");
+  if (navigator.vibrate) navigator.vibrate(8);
+});
+document.addEventListener("pointermove", (e) => {
+  if (!drag || e.pointerId !== drag.pid) return;
+  const row = drag.row, list = row.parentElement, main = $("#main"), r = main.getBoundingClientRect();
+  let dy = e.clientY - drag.y;
+  const next = row.nextElementSibling, prev = row.previousElementSibling;
+  if (next && next.classList.contains("hrow") && dy > next.offsetHeight / 2) { list.insertBefore(next, row); drag.y += next.offsetHeight; dy -= next.offsetHeight; }
+  else if (prev && prev.classList.contains("hrow") && dy < -prev.offsetHeight / 2) { list.insertBefore(row, prev); drag.y -= prev.offsetHeight; dy += prev.offsetHeight; }
+  row.style.transform = "translateY(" + dy + "px)";
+  // Nudge the page along when the finger nears the top or bottom edge.
+  const edge = e.clientY < r.top + 50 ? -12 : e.clientY > r.bottom - 50 ? 12 : 0;
+  if (edge) { const before = main.scrollTop; main.scrollTop += edge; drag.y -= main.scrollTop - before; }
+});
+function endDrag(e) {
+  if (!drag || (e.pointerId != null && e.pointerId !== drag.pid)) return;
+  const row = drag.row, ids = $$(".hrow", row.parentElement).map((x) => x.dataset.id);
+  row.style.transform = ""; row.classList.remove("dragging");
+  drag = null;
+  commitOrder(ids); render();
+}
+document.addEventListener("pointerup", endDrag);
+document.addEventListener("pointercancel", endDrag);
+
+// ---------- swipe left or right to change section ----------
+let sw = null;
+$("#main").addEventListener("touchstart", (e) => {
+  const t = e.target;
+  sw = e.touches.length === 1 && $("#sheet").hidden && !drag && !ui.selecting && !t.closest(".chips.scroll, input, textarea, select, .grip")
+    ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+}, { passive: true });
+$("#main").addEventListener("touchend", (e) => {
+  if (!sw) return;
+  const c = e.changedTouches[0], dx = c.clientX - sw.x, dy = c.clientY - sw.y;
+  sw = null;
+  if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.8) return;
+  const j = TABS.findIndex((t) => t[0] === ui.tab) + (dx < 0 ? 1 : -1);
+  if (j >= 0 && j < TABS.length) setTab(TABS[j][0], dx < 0 ? "fwd" : "back");
+}, { passive: true });
 
 // ================= boot =================
 function applyTheme() { const t = set().theme; if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t); }
 function openFromLink(id, alarm) {
   const r = db.recs[id];
   if (!r || r.del) return;
-  if (alarm) ring(r); else if (r.type === "item") editItem(id); else { ui.tab = "habits"; ui.habit = id; render(); }
+  if (alarm) ring(r); else if (r.type === "item") editItem(id); else { ui.hcal = id; setTab("habits"); }
 }
 applyTheme();
 if (db.recs.settings && db.recs.settings.tzOff !== DEF.tzOff) put({ ...set(), tzOff: DEF.tzOff });
@@ -1049,7 +1412,7 @@ if ("serviceWorker" in navigator) {
     if (d.open) sync().then(() => openFromLink(d.open, d.alarm));
   });
 }
-sync().then(() => {
+sync().then(loadCfg).then(() => {
   const p = new URLSearchParams(location.search);
   if (p.get("open")) { openFromLink(p.get("open"), p.get("alarm")); history.replaceState(null, "", "/"); }
 });

@@ -114,6 +114,14 @@ export function remText(r) {
   if (m % 60 === 0) return m / 60 + (m === 60 ? " hour" : " hours") + " before";
   return m + " min before";
 }
+// A habit done n times a day can have up to n reminder times, earliest first.
+export const habitTimes = (h) => (Array.isArray(h.rems) ? h.rems : h.remAt ? [h.remAt] : [])
+  .filter(Boolean).slice(0, Math.max(1, h.freq || 1)).sort();
+// Reminder number i (from 0) is pointless once this many check-offs are already in today.
+export function habitNeed(h, i) {
+  const n = habitTimes(h).length || 1, f = h.freq || 1;
+  return Math.min(f, Math.ceil(((i + 1) * f) / n));
+}
 // Upcoming reminder moments for one record. Anything more than 2 minutes in the
 // past is skipped, so editing an old task never re-sends an old reminder.
 // Repeating events and habits return their next two occurrences so the chain
@@ -141,13 +149,16 @@ export function fires(rec, set, now) {
       }
     }
   } else if (rec.type === "habit") {
-    if (rec.arch || !rec.remAt || !(rec.remCh || []).length) return out;
-    const [h, m] = hm(rec.remAt, "09:00");
-    let k = dayKey(now, o);
-    for (let i = 0; i < 3 && out.length < 2; i++, k = addDays(k, 1)) {
-      const at = keyTs(k, o, h, m);
-      if (at > floor) out.push({ key: rec.id + ":h", at, ch: rec.remCh, nag: 0 });
-    }
+    const times = habitTimes(rec);
+    if (rec.arch || !times.length || !(rec.remCh || []).length) return out;
+    times.forEach((tm, i) => {
+      const [h, m] = hm(tm, "09:00");
+      let k = dayKey(now, o), n = 0;
+      for (let j = 0; j < 3 && n < 2; j++, k = addDays(k, 1)) {
+        const at = keyTs(k, o, h, m);
+        if (at > floor) { out.push({ key: rec.id + ":h" + i, at, ch: rec.remCh, nag: 0 }); n++; }
+      }
+    });
   }
   return out;
 }

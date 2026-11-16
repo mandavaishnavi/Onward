@@ -6,8 +6,11 @@ A personal tasks + calendar + habits app for phone and laptop, hosted on Cloudfl
 - **Tasks and events**: lists, tags, priorities, subtasks, repeats, quick add that
   understands "call mom tomorrow 5pm #home !high every week".
 - **Calendar**: month and week views; repeating items show on every date.
-- **Habits**: the tally counter, built in. Daily check-offs, times-per-day, per-habit
-  calendar, streaks, and the tap counter.
+- **Habits**: the tally counter, built in. Daily check-offs, times-per-day, icons with
+  suggestions, tags (filter, group, and per-tag calendar), drag to reorder, multi-select
+  delete, a calendar that deepens with how much of a day is done, day detail, streaks,
+  tally marks, and the tap counter with saved entries. A habit done n times a day can
+  have up to n reminder times.
 - **Reminders**: any number per item. Each one picks its own time (presets, custom
   "N minutes/hours/days/weeks before", or an exact date and time) and its own
   channels: push, alarm, Telegram, email. Optional nudging until the task is done.
@@ -45,6 +48,13 @@ From a terminal instead:
 5. **Email** (once): make a free Resend account, create an API key, paste it with your
    address. Without a verified domain Resend only delivers to your own sign-up address.
 6. **Bring in my Tally counter data** (once): give the old app's address and sync key.
+
+## If a reminder does not arrive
+
+Open Settings (gear icon). The **Reminder status** card at the top shows whether the
+once-a-minute reminder clock is running, which channels are set up, how many reminders
+are queued, and the last few deliveries with the exact reason any of them failed.
+Each channel also has a **Send a test** button.
 
 ## Honest limits
 

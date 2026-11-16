@@ -8,7 +8,7 @@
 // Telegram and email details are entered inside the app (Settings) and stored
 // in the database, so there is nothing else to configure here.
 
-import { fires, complete, taskLog, tz, dayKey, keyTs, MIN, DAY, uid, fmtWhen } from "../public/shared.js";
+import { fires, complete, taskLog, habitNeed, tz, dayKey, keyTs, MIN, DAY, uid, fmtWhen } from "../public/shared.js";
 
 const enc = new TextEncoder();
 const J = (b, s = 200) => new Response(JSON.stringify(b), {
@@ -271,16 +271,29 @@ async function handleAct(req, env, url) {
     (a === "snooze" ? "Snooze 10 minutes" : "Mark as done") + "</button></form>");
 }
 
+// Keeps the last few deliveries (and why any failed) for the status panel in Settings.
+async function logSend(env, at, title, res) {
+  let log = [];
+  try { log = JSON.parse((await kget(env, "sendLog")) || "[]"); } catch (e) {}
+  log.unshift({ at, title: String(title).slice(0, 80), res });
+  await kset(env, "sendLog", JSON.stringify(log.slice(0, 8)));
+}
+
 // ---------- cron: runs every minute ----------
 async function tick(env) {
   await init(env);
   if (!env.APP_KEY) return;
   const now = Date.now(), set = await getSet(env), o = tz(set);
+  await kset(env, "lastTick", now); // shown in Settings so you can see the reminder clock is running
   const { results } = await env.DB.prepare("SELECT * FROM rem WHERE sent = 0 AND fire <= ? ORDER BY fire LIMIT 30").bind(now).all();
   for (const r of results) {
     const rec = await getRec(env, r.rid);
     let live = rec && !rec.del && !(rec.type === "item" && rec.done) && now - r.fire < 6 * 3600e3;
-    if (live && rec.type === "habit" && ((rec.done || {})[dayKey(now, o)] || 0) >= (rec.freq || 1)) live = false;
+    if (live && rec.type === "habit") {
+      // Skip a habit reminder when enough of today's check-offs are already in.
+      const hi = /:h(\d+)$/.exec(r.rk), need = hi ? habitNeed(rec, Number(hi[1])) : rec.freq || 1;
+      if (((rec.done || {})[dayKey(now, o)] || 0) >= need) live = false;
+    }
     const again = live && rec.type === "item" && r.nleft > 0;
     // Mark first, send second: if sending crashes, the reminder is not repeated forever.
     if (again) await env.DB.prepare("UPDATE rem SET fire = ?, nleft = nleft - 1, fired = fired + 1 WHERE rk = ? AND orig = ?").bind(now + r.nag * MIN, r.rk, r.orig).run();
@@ -294,7 +307,9 @@ async function tick(env) {
         body: isHabit ? "Habit check-in. One tap counts." : (nagging ? "Still waiting on this one. " : "") + fmtWhen(rec, o, now) + (rec.step ? "\nFirst step: " + rec.step : ""),
         tag: r.rk,
       };
-      try { await notify(env, ch, msg, rec.id); } catch (e) { console.log("notify failed", e); }
+      let res;
+      try { res = await notify(env, ch, msg, rec.id); } catch (e) { res = { error: String(e && e.message || e) }; }
+      await logSend(env, now, msg.title, res);
     }
     if (rec && !rec.del && (rec.type === "habit" || (rec.rep && rec.kind === "event"))) await env.DB.batch(sched(env, rec, set, now));
   }
@@ -314,10 +329,8 @@ async function tick(env) {
       }
       if (today.length || late.length) {
         const first = today.concat(late).sort((a, b) => (b.pri || 0) - (a.pri || 0))[0];
-        await notify(env, set.digestCh, {
-          title: "Today: " + today.length + " planned" + (late.length ? ", " + late.length + " carried over" : ""),
-          body: "Start with just one: " + first.title, tag: "digest",
-        }, "");
+        const title = "Today: " + today.length + " planned" + (late.length ? ", " + late.length + " carried over" : "");
+        await logSend(env, now, title, await notify(env, set.digestCh, { title, body: "Start with just one: " + first.title, tag: "digest" }, ""));
       }
     }
   }
@@ -337,7 +350,11 @@ async function handleConfig(req, env) {
     if (b.tgUnlink) await env.DB.prepare("DELETE FROM kv WHERE k = 'tgChat'").run();
   }
   const n = (await env.DB.prepare("SELECT COUNT(*) n FROM subs").first()).n;
+  const q = await env.DB.prepare("SELECT COUNT(*) n, MIN(fire) next FROM rem WHERE sent = 0").first();
+  let sendLog = [];
+  try { sendLog = JSON.parse((await kget(env, "sendLog")) || "[]"); } catch (e) {}
   return J({
+    lastTick: Number(await kget(env, "lastTick")) || 0, queued: q.n || 0, nextFire: q.next || 0, sendLog, now: Date.now(),
     tgToken: !!(await kget(env, "tgToken")), tgChat: !!(await kget(env, "tgChat")), resendKey: !!(await kget(env, "resendKey")),
     emailTo: (await kget(env, "emailTo")) || "", emailFrom: (await kget(env, "emailFrom")) || "", pushDevices: n,
   });
