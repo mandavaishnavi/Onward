@@ -1,0 +1,67 @@
+# Onward
+
+A personal tasks + calendar + habits app for phone and laptop, hosted on Cloudflare
+(one Worker, one D1 database, no build step).
+
+- **Tasks and events**: lists, tags, priorities, subtasks, repeats, quick add that
+  understands "call mom tomorrow 5pm #home !high every week".
+- **Calendar**: month and week views; repeating items show on every date.
+- **Habits**: the tally counter, built in. Daily check-offs, times-per-day, per-habit
+  calendar, streaks, and the tap counter.
+- **Reminders**: any number per item. Each one picks its own time (presets, custom
+  "N minutes/hours/days/weeks before", or an exact date and time) and its own
+  channels: push, alarm, Telegram, email. Optional nudging until the task is done.
+- **Game layer**: XP, levels, a day streak with freezes, three daily quests, confetti.
+- **ADHD-friendly**: "Pick one for me", a "tiniest first step" field, "Just 5 min"
+  focus timer, overdue tasks shown as "carried over" with one-tap "move all to today",
+  a Quick wins filter, and a morning plan message.
+
+## Deploy (about 10 minutes)
+
+1. **GitHub**: create a new repository (for example `onward`) and upload everything
+   in this folder.
+2. **Database**: Cloudflare dashboard > Storage & Databases > D1 > Create database,
+   name it `onward`. Copy its Database ID into `wrangler.jsonc`
+   (replace `PASTE-YOUR-D1-DATABASE-ID-HERE`) and commit.
+3. **Worker**: Workers & Pages > Create > Import a repository > pick the repo > Deploy.
+4. **Secret**: open the new Worker > Settings > Variables and Secrets > add a secret
+   named `APP_KEY`. Use a long passphrase; it is the only thing protecting your data.
+5. Open the Worker's address. The tables are created automatically on first use.
+
+From a terminal instead:
+
+    npm install
+    npx wrangler d1 create onward      # paste the id into wrangler.jsonc
+    npx wrangler secret put APP_KEY
+    npx wrangler deploy
+
+## Set up each device
+
+1. Open the address in Chrome. On Android: menu > "Add to Home screen" / "Install app".
+2. Gear icon > **Sync**: type your `APP_KEY`.
+3. **Notifications on this device** > "Turn on push + alarm here", then send a test.
+4. **Telegram** (once): create a bot with @BotFather, paste the token, press Start in
+   the bot, tap "Link my chat".
+5. **Email** (once): make a free Resend account, create an API key, paste it with your
+   address. Without a verified domain Resend only delivers to your own sign-up address.
+6. **Bring in my Tally counter data** (once): give the old app's address and sync key.
+
+## Honest limits
+
+- **Alarm**: a web app cannot ring like the Clock app while it is closed. "Alarm" sends
+  a notification that stays on screen until dismissed, with a long vibration and
+  Done / Snooze buttons. If the app is open, it rings full-screen with sound. For
+  something loud while the phone is locked, give the Onward notification channel a
+  loud sound in Android settings, or add Telegram to that reminder.
+- Reminders are checked once a minute, so they can arrive up to a minute late.
+- Times use your device's fixed UTC offset (correct for India; no daylight saving).
+- If the same record is edited on two devices while both are offline, the later edit wins.
+- Not built yet from TickTick: Kanban, Eisenhower matrix, timeline, countdowns,
+  statistics pages, sharing/collaboration, widgets, calendar subscriptions.
+
+## Layout
+
+    public/index.html, app.css, app.js   the app
+    public/shared.js                     date/repeat/reminder logic used by app and server
+    public/sw.js                         offline cache + push notifications
+    src/worker.js                        sync API, reminder cron, push/Telegram/email

@@ -1,0 +1,27 @@
+{
+  "name": "onward",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-01",
+  // Lets the one-time tally import reach your old tallycounter Worker.
+  "compatibility_flags": ["global_fetch_strictly_public"],
+
+  // Everything in public/ is served as a static file.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+
+  // Reminders are checked once a minute.
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+
+  // The D1 database that stores everything.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "onward",
+      "database_id": "864bf569-e42a-42e5-82ec-4e8078a06969"
+    }
+  ]
+}
