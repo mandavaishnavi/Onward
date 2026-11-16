@@ -11,6 +11,14 @@ A personal tasks + calendar + habits app for phone and laptop, hosted on Cloudfl
   delete, a calendar that deepens with how much of a day is done, day detail, streaks,
   tally marks, and the tap counter with saved entries. A habit done n times a day can
   have up to n reminder times.
+- **Now** (Foothold, built in): one step of one task at a time. "Start with 2 minutes",
+  a 60 minute dial, "Make it smaller", an "I'm stuck" helper, "Not now" with a note on
+  where you left off, guess vs. tracked time, a "left today" bar and a brain dump.
+  A session log, and charts of minutes focused by day, week or month, filtered by
+  tasks, habits or tag.
+- **Meaning to**: a shelf for things with no date in mind. Type "someday" in quick add.
+  Today offers one a day (Today / Not today / Let it go); after a month it asks if you
+  still want it. Finishing one earns bonus XP for the wait.
 - **Reminders**: any number per item. Each one picks its own time (presets, custom
   "N minutes/hours/days/weeks before", or an exact date and time) and its own
   channels: push, alarm, Telegram, email. Optional nudging until the task is done.
@@ -48,6 +56,7 @@ From a terminal instead:
 5. **Email** (once): make a free Resend account, create an API key, paste it with your
    address. Without a verified domain Resend only delivers to your own sign-up address.
 6. **Bring in my Tally counter data** (once): give the old app's address and sync key.
+7. **Bring in my Foothold data** (once): paste the backup copied from Foothold.
 
 ## If a reminder does not arrive
 

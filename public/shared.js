@@ -175,6 +175,7 @@ export function complete(it, now, set) {
     n.at = nextOcc(it.at, it.rep, o, after);
     n.subs = (it.subs || []).map((s) => ({ ...s, d: 0 }));
     n.cnt = (it.cnt || 0) + 1;
+    n.spent = 0; n.left = ""; // tracked time and the "where I left off" note start fresh
   } else n.done = now;
   return n;
 }
@@ -182,8 +183,10 @@ export function complete(it, now, set) {
 export function taskLog(it, now, set) {
   const o = tz(set);
   const late = it.at != null && it.at < keyTs(dayKey(now, o), o);
+  // Something from the "Meaning to" shelf earns more the longer it waited: 5, plus 2 a week, up to 25.
+  const shelf = it.shelfAt ? Math.min(25, 5 + 2 * Math.floor((now - it.shelfAt) / (7 * DAY))) : 0;
   return { id: "l" + uid(), type: "log", k: "task", ref: it.id, title: it.title, at: now, u: now,
-    xp: xpFor(it) + (late ? 5 : 0), late: late ? 1 : 0, prev: it.rep ? it.at : null };
+    xp: xpFor(it) + (late ? 5 : 0) + shelf, late: late ? 1 : 0, shelf, prev: it.rep ? it.at : null };
 }
 export function level(xp) {
   let L = 1;

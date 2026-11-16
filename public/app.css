@@ -267,3 +267,70 @@ details.grp summary{font-weight:650;padding:10px 0;cursor:pointer}
 }
 @keyframes slideF{from{opacity:0;transform:translateX(26px)}to{opacity:1;transform:none}}
 @keyframes slideB{from{opacity:0;transform:translateX(-26px)}to{opacity:1;transform:none}}
+
+/* Now tab (Foothold): one step at a time, dial timer, stuck panel */
+.dayleft{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted);margin:0 2px 8px}
+.dayleft .bar{flex:1}
+.dayleft .bar i{background:var(--gold)}
+.hdt{font-size:13px;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums}
+.nowc{padding:18px 16px;margin-top:8px}
+.eyebrow{font-size:13px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);overflow-wrap:anywhere}
+.why,.leftoff{font-size:14px;color:var(--muted);margin-top:6px}
+.leftoff{background:var(--soft);color:var(--ink);padding:8px 10px;border-radius:10px}
+.step{font-size:26px;line-height:1.2;font-weight:700;letter-spacing:-.01em;margin:10px 0 6px;overflow-wrap:anywhere}
+.lede{color:var(--muted);margin-bottom:12px}
+.prog{display:flex;align-items:center;gap:10px;font-size:13.5px;color:var(--muted);margin-bottom:12px}
+.dots{display:flex;gap:4px;flex-wrap:wrap}
+.dots i{width:8px;height:8px;border-radius:9px;background:var(--line)}
+.dots i.d{background:var(--accent)}.dots i.c{background:var(--gold)}
+.btn.big{width:100%;padding:16px;font-size:18px;margin:6px 0}
+.commit{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:14px;color:var(--muted);margin:8px 0}
+.acts{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.links{display:flex;gap:6px 16px;flex-wrap:wrap;margin-top:14px}
+.link{color:var(--accent);font-weight:650;font-size:14.5px;padding:6px 0;text-decoration:underline;text-underline-offset:3px}
+.inl{display:flex;gap:8px;margin-top:10px}
+.inl .in{flex:1;min-width:0}
+.panel{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:14px;margin-top:6px}
+.panel label,.panel .q{display:block;font-weight:650;margin-bottom:8px}
+.reasons{display:grid;gap:8px;margin-bottom:10px}
+.reasons .btn{justify-content:flex-start;text-align:left}
+.timer{display:flex;align-items:center;gap:16px;margin:6px 0}
+.disc{width:124px;height:124px;flex:none}
+.disc .face{fill:var(--paper);stroke:var(--line);stroke-width:1}
+.disc .wedge{fill:none;stroke:var(--accent)}
+.disc .hub{fill:var(--ink)}
+.disc line{stroke:var(--muted);stroke-width:1.2}
+.readout{display:flex;flex-direction:column;gap:2px}
+.tleft{font-size:44px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.ended{font-weight:650;margin:8px 0}
+.guess{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:14px;color:var(--muted);margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
+.allsteps{margin-top:12px;font-size:15px}
+.allsteps summary{cursor:pointer;font-weight:650;color:var(--muted);padding:6px 0}
+.allsteps li{padding:3px 0}
+.allsteps li.d{text-decoration:line-through;color:var(--muted)}
+.allsteps li.c{font-weight:650}
+
+/* focus history + charts */
+button.stat{cursor:pointer;font:inherit;color:inherit}
+button.stat span{color:var(--accent);font-weight:600}
+.vzhero{margin:16px 2px 8px}
+.vzhero b{display:block;font-size:34px;font-weight:700;line-height:1.1}
+.vzhero span{font-size:14px;color:var(--muted)}
+.vz{padding:12px}
+.vz svg{display:block;width:100%;height:auto}
+.vbar{fill:var(--accent)}
+.vbase{stroke:var(--muted);stroke-width:1}
+.vgrid{stroke:var(--line);stroke-width:1;stroke-dasharray:3 4}
+.vlab{font-size:10px;fill:var(--muted)}
+.vval{font-size:11px;font-weight:700;fill:var(--ink)}
+.vhit{fill:transparent;cursor:pointer;outline:0}
+.vhit.on,.vhit:hover{fill:var(--accent);fill-opacity:.1}
+.vrow{display:grid;grid-template-columns:minmax(0,1.2fr) 1fr 68px;gap:10px;align-items:center;font-size:14px;padding:5px 0}
+.vrow span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vrow i{height:8px;border-radius:9px;background:var(--line);overflow:hidden}
+.vrow i b{display:block;height:100%;background:var(--accent);border-radius:0 4px 4px 0}
+.vrow em{text-align:right;font-style:normal;color:var(--muted);font-variant-numeric:tabular-nums}
+
+/* "Meaning to" offer on Today */
+.shelfc{padding:14px;margin-top:12px;border-style:dashed}
+.shelfc h3{font-size:18px;margin:4px 0;overflow-wrap:anywhere}

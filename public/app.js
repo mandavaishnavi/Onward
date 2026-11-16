@@ -12,7 +12,8 @@ const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { retur
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } };
 
 const DEF = { id: "settings", type: "settings", tzOff: -new Date().getTimezoneOffset(), alldayAt: "09:00",
-  defOff: 0, defCh: ["push"], digestAt: "08:30", digestCh: ["push"], sound: true, theme: "auto", tap: { label: "", value: 0 } };
+  defOff: 0, defCh: ["push"], digestAt: "08:30", digestCh: ["push"], sound: true, theme: "auto", tap: { label: "", value: 0 },
+  dayStart: "08:00", dayEnd: "00:00", chime: 10 };
 const CHS = [["push", "🔔 Push"], ["alarm", "⏰ Alarm"], ["tg", "✈️ Telegram"], ["email", "✉️ Email"]];
 const PRE = [0, 5, 10, 15, 30, 60, 120, 1440, 2880, 10080];
 // The three tally-counter palettes, each with brown, teal, turquoise and olive added.
@@ -167,6 +168,7 @@ function game() {
       best = Math.max(best, streak);
     }
   }
+  xp = Math.max(0, xp - (set().xpOff || 0)); // "Reset level and XP" hides everything earned before the reset
   return (memo = { xp, ...level(xp), streak, best, freezes, frozen });
 }
 const tagKey = (t) => String(t || "").trim().toLowerCase();
@@ -205,13 +207,32 @@ const habitStats = (h) => calStats([h]);
 const habitDone = (h, k) => ((h.done || {})[k] || 0) >= (h.freq || 1);
 const startToday = () => keyTs(today(), O());
 
+// ---------- "Meaning to" shelf: undated things kept off Today, offered back one a day ----------
+const onShelf = (i) => !!i.shelf && !i.done && i.kind === "task";
+function waited(it) {
+  const d = Math.floor((Date.now() - (it.shelfAt || it.created || Date.now())) / DAY);
+  return d < 1 ? "added today" : d < 14 ? "waited " + d + (d === 1 ? " day" : " days") : "waited " + Math.floor(d / 7) + " weeks";
+}
+// Today's single offer. Never-offered items come first, then the longest since last offered, quick ones before heavy ones.
+function shelfOffer() {
+  const t = today();
+  if (lsGet("onward.shelfDay") === t) return null;
+  const light = (i) => (i.energy === "low" || (i.est && i.est <= 15) ? 0 : 1);
+  // Something shelved in the last day is left alone: you only just decided it could wait.
+  const c = items().filter((i) => onShelf(i) && Date.now() - (i.shelfAt || i.created || 0) > 20 * 3600e3).sort((a, b) => (a.offAt || "").localeCompare(b.offAt || "") || light(a) - light(b) || (a.shelfAt || 0) - (b.shelfAt || 0));
+  if (!c.length) return null;
+  const it = c[0], age = Date.now() - (it.shelfAt || it.created || Date.now());
+  return { it, ask: age > 30 * DAY && Date.now() - (it.askAt || 0) > 30 * DAY };
+}
+const shelfAnswered = () => lsSet("onward.shelfDay", today());
+
 // Three small things for today, chosen so there is nothing to decide.
 function quest() {
   const id = "q-" + today(), start = startToday();
   let q = db.recs[id] && !db.recs[id].del ? db.recs[id] : { id, type: "quest", picks: [] };
   if (q.picks.length >= 3) return q;
   const used = new Set(q.picks.map((p) => p.ref)), picks = q.picks.slice();
-  const open = items().filter((i) => i.kind === "task" && !i.done);
+  const open = items().filter((i) => i.kind === "task" && !i.done && !i.shelf);
   const due = open.filter((i) => i.at != null && i.at < start + DAY).sort((a, b) => (b.pri || 0) - (a.pri || 0) || a.at - b.at);
   const easy = open.filter((i) => (i.energy === "low" || (i.est && i.est <= 15)) && (i.at == null || i.at < start + DAY));
   const old = open.filter((i) => i.at == null).sort((a, b) => (a.created || 0) - (b.created || 0));
@@ -263,7 +284,14 @@ function toggleTask(id, el) {
   const before = game().L, t = Date.now(), l = taskLog(it, t, set()), prev = { ...it };
   put(complete(it, t, set())); put(l);
   celebrate(l.xp, el, before);
-  toast(l.late ? "Done. Late still counts. +" + l.xp + " XP" : "Done. +" + l.xp + " XP", () => { put(prev); del(l.id); });
+  let extra = "", hid = "";
+  if (it.est && (it.spent || 0) >= 60) { // guess vs. tracked time, kept so future guesses get better
+    const actual = Math.max(1, Math.round(it.spent / 60));
+    hid = put({ id: "h" + uid(), type: "hist", title: it.title, est: it.est, actual, at: t }).id;
+    extra = " You guessed " + dur(it.est) + " and tracked " + dur(actual) + ".";
+  }
+  if (nw.id === id) { nw = { id: "", why: "" }; saveNw(); }
+  toast((l.shelf ? "Finally done. +" : l.late ? "Done. Late still counts. +" : "Done. +") + l.xp + " XP" + (l.shelf ? " (" + l.shelf + " for the wait)." : ".") + extra, () => { put(prev); del(l.id); if (hid) del(hid); });
 }
 function tickHabit(id, d, el) {
   const h = db.recs[id], k = today(), done = { ...(h.done || {}) }, freq = h.freq || 1, o = O();
@@ -292,6 +320,7 @@ function parseQuick(text) {
   let s = " " + text + " ";
   s = s.replace(/\s#([\p{L}\d_-]+)/gu, (m, g) => { r.tags.push(g.toLowerCase()); return " "; });
   s = s.replace(/\s!(high|medium|med|low|[123])(?=\s)/i, (m, g) => { g = g.toLowerCase(); r.pri = g === "high" || g === "3" ? 3 : g === "low" || g === "1" ? 1 : 2; return " "; });
+  s = s.replace(/\s(someday|some day|meaning to)(?=\s)/i, () => { r.shelf = 1; return " "; });
   s = s.replace(/\s(every\s?day|daily)(?=\s)/i, () => { r.rep = { f: "d", n: 1 }; return " "; });
   s = s.replace(/\s(every\s+weekday|weekdays)(?=\s)/i, () => { r.rep = { f: "w", n: 1, days: [1, 2, 3, 4, 5] }; return " "; });
   s = s.replace(/\s(every\s+week|weekly)(?=\s)/i, () => { r.rep = { f: "w", n: 1 }; return " "; });
@@ -324,6 +353,7 @@ function quickFields(text, ctx) {
     f.at = p.tm ? keyTs(dk, o, ...p.tm.split(":").map(Number)) : keyTs(dk, o);
   }
   if (f.rep && f.rep.f === "m" && f.at != null) f.rep.dom = loc(f.at, o).getUTCDate();
+  if ((p.shelf || ctx.shelf) && f.at == null) { f.shelf = 1; f.shelfAt = Date.now(); }
   if (ctx.list) f.list = ctx.list;
   if (ctx.tag && !f.tags.includes(ctx.tag)) f.tags.push(ctx.tag);
   return f;
@@ -331,6 +361,7 @@ function quickFields(text, ctx) {
 function quickPreview(text) {
   const p = parseQuick(text), o = O(), out = [];
   if (p.dk) out.push("📅 " + fmtDay(keyTs(p.dk, o), o, Date.now()) + (p.tm ? ", " + fmtTime(keyTs(p.dk, o, ...p.tm.split(":").map(Number)), o) : ""));
+  if (p.shelf && !p.dk) out.push("🗂 Meaning to");
   if (p.rep) out.push("↻ " + repText(p.rep));
   if (p.pri) out.push(["", "Low", "Medium", "High"][p.pri] + " priority");
   for (const t of p.tags) out.push("#" + t);
@@ -339,14 +370,15 @@ function quickPreview(text) {
 
 // ================= views =================
 const ui = { tab: "today", filter: "inbox", q: "", month: today().slice(0, 7), sel: today(), calMode: "month", showDone: false,
-  hcal: "all", hmonth: today().slice(0, 7), hSort: lsGet("onward.hsort") === "tag" ? "tag" : "manual", hFilter: "", selecting: false, selected: {}, collapsed: {} };
-const TABS = [["today", "Today"], ["tasks", "Tasks"], ["cal", "Calendar"], ["habits", "Habits"], ["focus", "Focus"]];
+  hcal: "all", hmonth: today().slice(0, 7), hSort: lsGet("onward.hsort") === "tag" ? "tag" : "manual", hFilter: "", selecting: false, selected: {}, collapsed: {}, foRef: "" };
+const TABS = [["today", "Today"], ["tasks", "Tasks"], ["cal", "Calendar"], ["habits", "Habits"], ["focus", "Now"]];
 
 const listOf = (it) => (it.list && db.recs[it.list] && !db.recs[it.list].del ? db.recs[it.list] : null);
 function row(it, opt = {}) {
   const o = O(), now = Date.now(), at = opt.occ != null ? opt.occ : it.at, meta = [], L = listOf(it);
   const late = it.kind === "task" && !it.done && at != null && at < (it.allDay ? startToday() : now);
   if (at != null) meta.push('<span class="' + (late ? "late" : "") + '">' + esc(opt.timeOnly ? (it.allDay ? "All day" : fmtTime(at, o)) : fmtWhen({ at, allDay: it.allDay }, o, now)) + "</span>");
+  if (onShelf(it)) meta.push("Meaning to · " + waited(it));
   if (it.kind === "event" && !it.allDay && it.dur) meta.push(it.dur < 60 ? it.dur + " min" : it.dur / 60 + " h");
   if (it.rep) meta.push("↻ " + esc(repText(it.rep)));
   if (L && !opt.noList) meta.push(esc(L.name));
@@ -361,7 +393,7 @@ function row(it, opt = {}) {
     '<div class="rt"><div class="ti">' + esc(it.title) + "</div>" + (it.step && !it.done ? '<div class="st">→ ' + esc(it.step) + "</div>" : "") +
     (meta.length ? '<div class="me">' + meta.join(" · ") + "</div>" : "") + "</div></div>";
 }
-const quickAdd = (ph) => '<div class="card qa"><input id="qa" type="text" enterkeyhint="done" autocomplete="off" placeholder="' + esc(ph) +
+const quickAdd = (ph) => '<div class="card qa"><input id="qa" type="text" list="names" enterkeyhint="done" autocomplete="off" placeholder="' + esc(ph) +
   '" aria-label="Quick add"><button data-a="qaAdd" aria-label="Add">+</button></div><div class="qap" id="qap"></div>';
 const habitRow = (h, m = {}) => {
   const k = today(), n = (h.done || {})[k] || 0, freq = h.freq || 1, full = n >= freq, st = habitStats(h), col = calColor(h.color), times = habitTimes(h);
@@ -397,13 +429,18 @@ function vToday() {
   const hs = habits(), hd = hs.filter((h) => habitDone(h, t)).length;
   const done = logs().filter((l) => dayKey(l.at, o) === t).sort((a, b) => b.at - a.at);
   const q = quest();
-  let h = quickAdd("Add anything… try “call mom tomorrow 5pm”");
+  const dl = dayLeft();
+  let h = '<div class="dayleft"><span id="dayLab">' + esc(dl.label) + '</span><div class="bar"><i id="dayFill" style="width:' + dl.pct + '%"></i></div></div>' + quickAdd("Add anything… try “call mom tomorrow 5pm”");
   if (q.picks.length) {
     const st = q.picks.map(questState), n = st.filter((s) => s.ok).length;
     h += '<div class="card quests"><h3>🎯 Today’s quests <span>' + n + "/" + q.picks.length + " · +15 XP each</span></h3>" +
       q.picks.map((p, i) => '<div class="quest' + (st[i].ok ? " ok" : "") + '" data-a="questOpen" data-i="' + i + '" role="button" tabindex="0"><span class="qd">' + (st[i].ok ? "✓" : "") + "</span>" + esc(st[i].title) + "</div>").join("") + "</div>";
   }
   h += '<button class="btn soft pick" data-a="pick">🎲 Can’t decide? Pick one for me</button>';
+  const so = shelfOffer();
+  if (so) h += '<div class="card shelfc"><p class="eyebrow">Meaning to · ' + waited(so.it) + '</p><h3>' + esc(so.it.title) + "</h3>" + (so.ask
+    ? '<p class="hint">Still want this? Dropping it is a decision, not a failure.</p><div class="acts"><button class="btn sm" data-a="shKeep" data-id="' + so.it.id + '">Keep</button><button class="btn ghost sm" data-a="shSmall" data-id="' + so.it.id + '">Make it smaller</button><button class="btn ghost sm" data-a="shDrop" data-id="' + so.it.id + '">Drop</button></div>'
+    : '<p class="hint">Want to do this one today? No is a fine answer.</p><div class="acts"><button class="btn sm" data-a="shToday" data-id="' + so.it.id + '">Today</button><button class="btn ghost sm" data-a="shNo" data-id="' + so.it.id + '">Not today</button><button class="btn ghost sm" data-a="shDrop" data-id="' + so.it.id + '">Let it go</button></div>') + "</div>";
   if (late.length) h += '<div class="sec">Carried over <span class="n">' + late.length + '</span><button data-a="lateToday">Move all to today</button></div><div class="card list">' + late.map((i) => row(i)).join("") + "</div>";
   h += '<div class="sec">Today <span class="n">' + (cur.length || "") + "</span></div>";
   h += cur.length ? '<div class="card list">' + cur.map((x) => row(x.it, { occ: x.occ, timeOnly: true })).join("") + "</div>"
@@ -421,21 +458,22 @@ function vTasks() {
   const o = O(), start = startToday(), f = ui.filter, its = items(), q = ui.q.trim().toLowerCase();
   const tags = [...new Set(its.filter((i) => !i.done).flatMap((i) => i.tags || []))].sort();
   const chip = (v, l) => '<button class="chip" data-a="filter" data-v="' + esc(v) + '" aria-pressed="' + (f === v) + '">' + esc(l) + "</button>";
-  let h = '<div class="chips scroll">' + chip("inbox", "Inbox") + chip("all", "All") + chip("week", "Next 7 days") + chip("quick", "Quick wins") +
+  let h = '<div class="chips scroll">' + chip("inbox", "Inbox") + chip("all", "All") + chip("week", "Next 7 days") + chip("shelf", "Meaning to") + chip("quick", "Quick wins") +
     lists().map((l) => chip("list:" + l.id, l.name)).join("") + tags.map((t) => chip("tag:" + t, "#" + t)).join("") + chip("done", "Completed") +
-    '<button class="chip" data-a="listNew">+ List</button></div>';
+    '<button class="chip" data-a="listNew">+ List</button><button class="chip" data-a="dump">🧠 Brain dump</button></div>';
   const lid = f.startsWith("list:") ? f.slice(5) : "", tag = f.startsWith("tag:") ? f.slice(4) : "";
-  if (f !== "done") h += quickAdd(lid && db.recs[lid] ? "Add to " + db.recs[lid].name + "…" : "Add a task…");
+  if (f !== "done") h += quickAdd(f === "shelf" ? "Something you keep meaning to do…" : lid && db.recs[lid] ? "Add to " + db.recs[lid].name + "…" : "Add a task…");
+  if (f === "shelf") h += '<p class="hint" style="margin:2px 4px 0">No dates and no reminders here. Today offers you one of these a day, and saying no is fine.</p>';
   h += '<input class="in" id="q" type="search" placeholder="Search" aria-label="Search tasks" value="' + esc(ui.q) + '" style="margin-top:6px">';
   if (lid && db.recs[lid]) h += '<div class="sec">' + esc(db.recs[lid].name) + '<button data-a="listEdit" data-id="' + lid + '">Edit list</button></div>';
   let arr = its.filter((i) => (f === "done" ? i.done : !i.done)).filter((i) =>
-    f === "inbox" ? !listOf(i) : f === "week" ? i.at != null && i.at < start + 7 * DAY : f === "quick" ? i.kind === "task" && (i.energy === "low" || (i.est && i.est <= 15)) :
+    f === "shelf" ? onShelf(i) : f === "inbox" ? !listOf(i) && !i.shelf : f === "week" ? i.at != null && i.at < start + 7 * DAY : f === "quick" ? i.kind === "task" && (i.energy === "low" || (i.est && i.est <= 15)) :
     lid ? i.list === lid : tag ? (i.tags || []).includes(tag) : true);
   if (q) arr = arr.filter((i) => (i.title + " " + (i.notes || "") + " " + (i.tags || []).join(" ")).toLowerCase().includes(q));
-  if (!arr.length) return h + '<div class="card empty" style="margin-top:14px">' + (q ? "Nothing matches that search." : f === "done" ? "Finished tasks will collect here." : f === "quick" ? "Tasks marked low energy or 15 minutes or less show up here." : "Nothing here. Enjoy the quiet.") + "</div>";
+  if (!arr.length) return h + '<div class="card empty" style="margin-top:14px">' + (q ? "Nothing matches that search." : f === "done" ? "Finished tasks will collect here." : f === "quick" ? "Tasks marked low energy or 15 minutes or less show up here." : f === "shelf" ? "Things you keep meaning to do, with no date in mind, live here. Add one above, or type “someday” in any quick add." : "Nothing here. Enjoy the quiet.") + "</div>";
   if (f === "done") return h + '<div class="card list" style="margin-top:14px">' + arr.sort((a, b) => b.done - a.done).slice(0, 200).map((i) => row(i)).join("") + "</div>";
-  const names = ["Carried over", "Today", "Tomorrow", "Next 7 days", "Later", "No date"], groups = names.map(() => []);
-  for (const i of arr) groups[i.at == null ? 5 : i.at < start ? (i.kind === "event" && i.rep ? 4 : 0) : i.at < start + DAY ? 1 : i.at < start + 2 * DAY ? 2 : i.at < start + 7 * DAY ? 3 : 4].push(i);
+  const names = ["Carried over", "Today", "Tomorrow", "Next 7 days", "Later", "No date", "Meaning to"], groups = names.map(() => []);
+  for (const i of arr) groups[i.at == null ? (i.shelf ? 6 : 5) : i.at < start ? (i.kind === "event" && i.rep ? 4 : 0) : i.at < start + DAY ? 1 : i.at < start + 2 * DAY ? 2 : i.at < start + 7 * DAY ? 3 : 4].push(i);
   groups.forEach((g, n) => { if (g.length) h += '<div class="sec">' + names[n] + ' <span class="n">' + g.length + '</span></div><div class="card list">' + g.sort(byAt).map((i) => row(i, { noList: !!lid })).join("") + "</div>"; });
   return h;
 }
@@ -565,62 +603,219 @@ function cycleDay(id, k, el) {
   put({ ...h, done: dn });
 }
 
-// ---------- focus timer ----------
-let fo = null;
+// ---------- Now: one step at a time (Foothold), with the focus timer ----------
+let fo = null, nw = { id: "", why: "" }, np = { panel: "", stuck: "", prompt: "", skip: [] }, wl = null;
 try { fo = JSON.parse(lsGet("onward.focus")); } catch (e) {}
+try { nw = JSON.parse(lsGet("onward.now")) || nw; } catch (e) {}
 const saveFo = () => lsSet("onward.focus", JSON.stringify(fo));
+const saveNw = () => lsSet("onward.now", JSON.stringify(nw));
 const mmss = (ms) => { const s = Math.max(0, Math.ceil(ms / 1000)); return pad(Math.floor(s / 60)) + ":" + pad(s % 60); };
-function vFocus() {
-  const o = O(), t = today(), start = startToday(), running = fo && (fo.end || fo.left);
-  const cand = items().filter((i) => i.kind === "task" && !i.done && (i.at == null || i.at < start + DAY)).sort(byAt).slice(0, 40);
-  const mins = logs().filter((l) => l.k === "focus" && dayKey(l.at, o) === t).reduce((n, l) => n + (l.min || 0), 0);
-  let h = '<div class="card focus"><div class="hint">' + (running ? "Stay with it. Just this one thing." : "Starting is the hard part. Five minutes counts.") + "</div>" +
-    '<div class="clock" id="clock">' + (running ? mmss(fo.end ? fo.end - Date.now() : fo.left) : "25:00") + "</div>";
-  h += '<select class="in" id="foRef" aria-label="Task to focus on"><option value="">No specific task</option>' +
-    cand.map((i) => '<option value="' + i.id + '"' + (fo && fo.ref === i.id ? " selected" : "") + ">" + esc(i.title) + "</option>").join("") + "</select>";
-  if (running) h += '<div class="r2"><button class="btn" data-a="foPause">' + (fo.end ? "Pause" : "Resume") + '</button><button class="btn ghost" data-a="foStop">Finish early</button><button class="btn ghost" data-a="foReset">Reset</button></div>';
-  else h += '<div class="chips" style="justify-content:center">' + [5, 15, 25, 50].map((n) => '<button class="btn ' + (n === 5 ? "" : "ghost") + '" data-a="foStart" data-v="' + n + '">' + (n === 5 ? "Just 5 min" : n + " min") + "</button>").join("") + "</div>";
-  h += "</div>";
-  h += '<div class="stats" style="grid-template-columns:repeat(2,1fr)"><div class="card stat"><b>' + mins + '</b><span>Minutes focused today</span></div><div class="card stat"><b>' +
-    logs().filter((l) => l.k === "focus" && dayKey(l.at, o) === t).length + "</b><span>Sessions today</span></div></div>";
-  h += '<p class="hint">Finish early still earns XP for the minutes you did. Reset throws the session away. Keep this tab open while the timer runs.</p>';
-  return h;
+const dur = (m) => { m = Math.round(m); if (m < 60) return m + " min"; const h = Math.floor(m / 60), r = m % 60; return r ? h + " h " + r + " m" : h + " h"; };
+const running = () => !!(fo && (fo.end || fo.left));
+const nowTask = () => { const it = db.recs[nw.id]; return it && !it.del && !it.done && it.kind === "task" ? it : null; };
+const wakeOn = () => { try { if (navigator.wakeLock && !wl) navigator.wakeLock.request("screen").then((l) => { wl = l; l.addEventListener("release", () => { wl = null; }); }).catch(() => {}); } catch (e) {} };
+const wakeOff = () => { try { if (wl) { wl.release(); wl = null; } } catch (e) {} };
+// How much of your day is left, between the day start and end set in Settings.
+function dayLeft() {
+  const s = set(), d = new Date(), m = (x) => { const p = String(x || "0:0").split(":"); return +p[0] * 60 + (+p[1] || 0); };
+  let n = d.getHours() * 60 + d.getMinutes(), a = m(s.dayStart), e = m(s.dayEnd), label, frac;
+  if (e <= a) e += 1440;
+  if (n < a && n + 1440 < e) n += 1440;
+  if (n < a) { label = "day starts at " + s.dayStart; frac = 0; } else if (n >= e) { label = "past your day end"; frac = 1; } else { label = dur(e - n) + " left today"; frac = (n - a) / (e - a); }
+  return { label: fmtTime(Date.now(), O()) + " · " + label, pct: Math.round(frac * 100) };
 }
-function foFinish(early) {
-  if (!fo) return;
-  const total = fo.min * MIN, left = fo.end ? fo.end - Date.now() : fo.left || 0, min = Math.max(0, Math.round((total - Math.max(0, left)) / MIN));
-  const ref = db.recs[fo.ref], before = game().L;
-  fo = fo.ref ? { ref: fo.ref } : null; saveFo();
+function setNow(id, why) {
+  if (running() && fo.ref !== id) foFinish(true, true);
+  if (fo && fo.ended) { fo = null; saveFo(); }
+  nw = { id, why: why || "" }; saveNw();
+  np.panel = ""; np.stuck = "";
+}
+// Chooses for you and says why. "small" hands over the lightest thing on the list.
+function pickFor(skip, mode) {
+  const start = startToday(), c = items().filter((i) => i.kind === "task" && !i.done && !i.shelf && !skip.includes(i.id) && (i.at == null || i.at < start + DAY));
+  if (!c.length) return null;
+  const est = (x) => x.est || 9999, age = (a, b) => (a.created || 0) - (b.created || 0);
+  if (mode !== "small") {
+    const due = c.filter((i) => i.at != null).sort((a, b) => a.at - b.at || (b.pri || 0) - (a.pri || 0))[0];
+    if (due) return { t: due, why: due.at < start ? "it has been waiting the longest" : "it is due today" };
+    const st = c.find((i) => i.spent > 0 || i.left || (i.subs || []).some((x) => x.d));
+    if (st) return { t: st, why: "you already started it" };
+    const hi = c.filter((i) => i.pri).sort((a, b) => b.pri - a.pri)[0];
+    if (hi) return { t: hi, why: "it is your highest priority" };
+  }
+  const t = c.slice().sort((a, b) => est(a) - est(b) || age(a, b))[0];
+  return { t, why: mode === "small" ? "it is the smallest thing on your list" : t.est ? "it has the shortest guess on your list" : "it has waited longest on your list" };
+}
+function pickNow() {
+  let p = pickFor(np.skip);
+  if (!p && np.skip.length) { np.skip = []; p = pickFor([]); }
+  if (!p) { toast("Nothing waiting. Add a task first."); return false; }
+  np.skip.push(p.t.id); setNow(p.t.id, p.why);
+  return true;
+}
+const openShrink = (prompt) => { np.panel = "shrink"; np.prompt = prompt; };
+const STUCK = {
+  start: { q: "I don’t know where to start", go: () => openShrink("What would your hands do first? Name something physical.") },
+  big: { q: "It feels too big", go: () => openShrink("Cut off a piece you could finish in 2 minutes. What is it?") },
+  need: { q: "I need something else first", go: () => openShrink("What has to happen first?") },
+  dread: { q: "I’m dreading it", tip: "Do it badly on purpose for 2 minutes. A bad version counts, and you can stop when the timer ends.", btn: "Start 2 minutes", act: () => foStart(2, true) },
+  boring: { q: "It’s boring", tip: "Race it. Guess how fast you can finish this step, then try to beat a 10 minute clock.", btn: "Start 10 minutes", act: () => foStart(10) },
+  tired: { q: "I have no energy for this", tip: "Park it. Take the smallest thing on your list, or stop for now.", btn: "Give me something small", act: () => {
+    const p = pickFor([nw.id], "small");
+    if (!p) { toast("Nothing smaller on the list. Stopping is allowed."); np.panel = ""; np.stuck = ""; return; }
+    setNow(p.t.id, p.why);
+  } },
+};
+function foStart(min, starter) {
+  const it = nowTask();
+  const pick = $("#foRef");
+  if (pick) ui.foRef = pick.value;
+  fo = { ref: it ? it.id : (fo && fo.ended && fo.ref) || ui.foRef || "", min, end: Date.now() + min * MIN, starter: !!starter, lastChk: 0 };
+  np.panel = ""; np.stuck = ""; saveFo(); wakeOn(); beep([523]);
+}
+// Adds the time actually spent to the task, so guesses can be compared with reality.
+function foBank() {
+  const left = fo.end ? fo.end - Date.now() : fo.left || 0, secs = Math.max(0, Math.round((fo.min * MIN - Math.max(0, left)) / 1000)), it = db.recs[fo.ref];
+  if (it && it.type === "item" && !it.del && secs) put({ ...it, spent: (it.spent || 0) + secs });
+  return secs;
+}
+function foFinish(early, quiet) {
+  if (!running()) return;
+  const was = fo, min = Math.round(foBank() / 60), ref = db.recs[was.ref], before = game().L;
+  fo = early ? null : { ref: was.ref, ended: 1, min: was.min, starter: was.starter }; saveFo(); wakeOff();
   document.title = "Onward";
   if (min >= 1) {
     const xp = Math.max(2, Math.round(min / 5) * 2);
-    put({ id: "l" + uid(), type: "log", k: "focus", ref: ref ? ref.id : "", title: "Focused " + min + " min" + (ref ? ": " + ref.title : ""), at: Date.now(), xp, min });
-    celebrate(xp, $("#clock"), before, !early);
-    toast(early ? "Stopped at " + min + " min. That still counts. +" + xp + " XP" : "Session complete. +" + xp + " XP");
-    if (!early) { beep([660, 880, 1100]); if (navigator.vibrate) navigator.vibrate([300, 100, 300]); }
+    put({ id: "l" + uid(), type: "log", k: "focus", ref: ref ? ref.id : "", title: "Focused " + min + " min" + (ref ? ": " + (ref.title || ref.name) : ""), at: Date.now(), xp, min });
+    if (!quiet) { celebrate(xp, $("#clock"), before, !early); toast(early ? "Stopped at " + min + " min. That still counts. +" + xp + " XP" : (was.starter ? "2 minutes done. Starting was the hard part." : dur(min) + " done.") + " +" + xp + " XP"); }
+  } else if (!quiet) toast("Stopped. Nothing lost.");
+  if (!early) {
+    beep([660, 880, 1100], 0.3, 0.5); if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+    try { if (document.hidden && "Notification" in window && Notification.permission === "granted") navigator.serviceWorker.ready.then((r) => r.showNotification(was.starter ? "2 minutes done" : dur(was.min) + " done", { body: ref ? ref.title || ref.name : "", tag: "timer", icon: "/icon-192.png" })); } catch (e) {}
   }
   checkQuests(); render();
 }
 function foTick() {
-  if (!fo || !fo.end) return;
-  const left = fo.end - Date.now();
+  const hd = $("#hdt");
+  if (!fo || !fo.end) { if (hd && !running()) hd.hidden = true; return; }
+  const now = Date.now(), left = fo.end - now;
   if (left <= 0) return foFinish(false);
-  const el = $("#clock");
+  const em = Math.floor((fo.min * MIN - left) / MIN), ck = +set().chime;
+  if (ck > 0 && em > 0 && em % ck === 0 && fo.lastChk !== em) { fo.lastChk = em; saveFo(); beep([520], 0.3, 0.12); }
+  const el = $("#clock"), w = $("#wedge");
   if (el) el.textContent = mmss(left);
+  if (w) w.setAttribute("stroke-dasharray", (Math.min(1, left / 3600000) * 169.65).toFixed(2) + " 169.65");
+  if (hd) hd.textContent = "⏱ " + mmss(left) + " left";
   document.title = mmss(left) + " · Onward";
+}
+// A 60 minute dial, so 25 minutes always looks like 25 minutes.
+function dial() {
+  const left = Math.max(0, fo.end ? fo.end - Date.now() : fo.left);
+  let ticks = "";
+  for (let i = 0; i < 12; i++) { const a = (i * Math.PI) / 6, x = Math.sin(a), y = -Math.cos(a); ticks += '<line x1="' + (60 + x * 55).toFixed(1) + '" y1="' + (60 + y * 55).toFixed(1) + '" x2="' + (60 + x * 59).toFixed(1) + '" y2="' + (60 + y * 59).toFixed(1) + '"/>'; }
+  return '<div class="timer"><svg class="disc" viewBox="0 0 120 120" role="img" aria-label="Time left, shown on a 60 minute dial"><circle class="face" cx="60" cy="60" r="54"/>' +
+    '<circle class="wedge" id="wedge" cx="60" cy="60" r="27" stroke-width="54" transform="rotate(-90 60 60)" stroke-dasharray="' + (Math.min(1, left / 3600000) * 169.65).toFixed(2) + ' 169.65"/>' + ticks + '<circle class="hub" cx="60" cy="60" r="3.5"/></svg>' +
+    '<div class="readout"><span class="tleft" id="clock">' + mmss(left) + '</span><span class="hint">' + (fo.end ? "left · ends " + fmtTime(fo.end, O()) : "paused") + '</span><span class="hint">' + (fo.starter ? "You can stop when it ends." : "Full dial is 60 minutes.") + "</span></div></div>";
+}
+function timerBox(hasStep) {
+  const step = hasStep ? '<button class="btn" data-a="nwStepDone">Step done</button>' : "";
+  if (running()) return dial() + '<div class="acts">' + step + '<button class="btn ghost" data-a="foPause">' + (fo.end ? "Pause" : "Resume") + '</button><button class="btn ghost" data-a="foStop">Finish early</button><button class="btn ghost" data-a="foReset">Reset</button></div>';
+  if (fo && fo.ended) return '<p class="ended">' + (fo.starter ? "2 minutes done. Starting was the hard part." : dur(fo.min) + " done.") + '</p><div class="acts"><button class="btn" data-a="foStart" data-v="10">Keep going 10 min</button><button class="btn ghost" data-a="foStart" data-v="25">25 min</button>' +
+    (hasStep ? '<button class="btn ghost" data-a="nwStepDone">Step done</button>' : '<button class="btn ghost" data-a="foClear">Enough for now</button>') + "</div>";
+  return '<button class="btn big" data-a="foStart" data-v="2" data-s="1">Start with 2 minutes</button><div class="commit"><span>Or commit to</span>' + [10, 25, 45].map((n) => '<button class="chip" data-a="foStart" data-v="' + n + '">' + n + " min</button>").join("") + "</div>" +
+    (hasStep ? '<div class="acts"><button class="btn ghost" data-a="nwStepDone">Step done</button></div>' : "");
+}
+function panelHtml() {
+  const cancel = '<button class="link" data-a="nwClose">Cancel</button>';
+  if (np.panel === "shrink") return '<div class="panel"><label for="nwShrink">' + esc(np.prompt) + '</label><input class="in" id="nwShrink" type="text" autocomplete="off" placeholder="A smaller step"><div class="acts"><button class="btn" data-a="nwShrinkGo">Do this first</button>' + cancel + "</div></div>";
+  if (np.panel === "park") return '<div class="panel"><label for="nwPark">Where are you leaving off? (optional)</label><input class="in" id="nwPark" type="text" autocomplete="off" placeholder="A note for when you come back"><div class="acts"><button class="btn" data-a="nwParkGo">Park it</button>' + cancel + "</div></div>";
+  if (np.panel === "stuck") {
+    if (np.stuck) { const r = STUCK[np.stuck]; return '<div class="panel"><p class="q">' + esc(r.q) + "</p><p>" + esc(r.tip) + '</p><div class="acts"><button class="btn" data-a="nwTactic">' + esc(r.btn) + '</button><button class="link" data-a="nwStuck">Back</button></div></div>'; }
+    return '<div class="panel"><p class="q">What is in the way?</p><div class="reasons">' + Object.keys(STUCK).map((k) => '<button class="btn ghost" data-a="nwReason" data-v="' + k + '">' + esc(STUCK[k].q) + "</button>").join("") + '</div><button class="link" data-a="nwClose">Never mind</button></div>';
+  }
+  return "";
+}
+const dumpForm = () => '<textarea class="in" id="dumpText" rows="5" placeholder="One thing per line. Messy is fine."></textarea><button class="btn" style="margin-top:8px" data-a="dumpGo">Add to my list</button>';
+function vFocus() {
+  const o = O(), t = today(), start = startToday(), it = nowTask();
+  let h = "";
+  if (!it) {
+    const open = items().filter((i) => i.kind === "task" && !i.done && !i.shelf);
+    if (!open.length) h += '<div class="card nowc"><h1 class="step">Nothing on your list.</h1><p class="lede">Write down whatever is taking up space in your head. Sorting comes later.</p>' + dumpForm() + "</div>";
+    else {
+      let list = open.filter((i) => i.at != null && i.at < start + DAY).sort(byAt), from = "Today";
+      if (!list.length) { list = open.filter((i) => i.at == null).sort((a, b) => (a.created || 0) - (b.created || 0)); from = "From your list, because today is empty"; }
+      if (!list.length) { list = open.slice().sort(byAt); from = "Coming up"; }
+      h += '<div class="card nowc"><h1 class="step">What now?</h1><p class="lede">Choosing is work too. Let the app choose, or tap one yourself.</p><button class="btn big" data-a="nwPick">Pick for me</button></div>' +
+        '<div class="sec">' + from + '</div><div class="card list">' + list.slice(0, 6).map((x) => '<div class="row" data-a="nwSet" data-id="' + x.id + '" role="button" tabindex="0"><div class="rt"><div class="ti">' + esc(x.title) + "</div>" +
+        (x.left || x.est || x.at != null ? '<div class="me">' + [x.at != null ? fmtWhen(x, o, Date.now()) : "", x.est ? "~" + dur(x.est) : "", x.left ? "left off: " + x.left : ""].filter(Boolean).map(esc).join(" · ") + "</div>" : "") + "</div></div>").join("") + "</div>";
+    }
+    const tk = items().filter((i) => i.kind === "task" && !i.done).sort(byAt).slice(0, 40), hb = habits();
+    h += '<div class="sec">Or just run a timer</div><div class="card nowc">' + (running() || (fo && fo.ended) ? "" : '<select class="in" id="foRef" aria-label="What the timer is for" style="margin-bottom:8px"><option value="">Nothing specific</option>' +
+      (tk.length ? '<optgroup label="Tasks">' + opts(tk.map((i) => [i.id, i.title]), ui.foRef) + "</optgroup>" : "") + (hb.length ? '<optgroup label="Habits">' + opts(hb.map((x) => [x.id, (x.icon ? x.icon + " " : "") + x.name]), ui.foRef) + "</optgroup>" : "") + "</select>") + timerBox(false) + "</div>";
+  } else {
+    const subs = it.subs || [], n = subs.length, dn = subs.filter((x) => x.d).length, st = subs.find((x) => !x.d) || (!n && it.step ? { t: it.step } : null);
+    const park = '<button class="link" data-a="nwPark">Not now</button>';
+    h += '<div class="card nowc"><p class="eyebrow">' + esc(it.title) + "</p>";
+    if (nw.why) h += '<p class="why">Picked because ' + esc(nw.why) + '. <button class="link" data-a="nwAnother">Pick another</button></p>';
+    if (it.left) h += '<p class="leftoff"><b>Where you left off:</b> ' + esc(it.left) + "</p>";
+    if (!st && !n) {
+      h += '<h1 class="step">What would your hands do first?</h1><p class="lede">Name something physical and small, like opening the file or putting on shoes.</p>' +
+        '<div class="inl"><input class="in" id="nwFirst" type="text" autocomplete="off" placeholder="First tiny step" aria-label="First tiny step"><button class="btn" data-a="nwFirst">Add</button></div>' +
+        '<div class="links"><button class="link" data-a="nwOne">It is one step. Just start.</button>' + park + '<button class="link" data-a="nwEdit">Edit task</button></div>' + (np.panel === "park" ? panelHtml() : "");
+    } else if (!st) {
+      h += '<h1 class="step">All steps done. Is the whole task finished?</h1><button class="btn big" data-a="nwFinish">Yes, finished</button>' +
+        '<div class="inl"><input class="in" id="nwAdd" type="text" autocomplete="off" placeholder="Or add the next step" aria-label="Next step"><button class="btn ghost" data-a="nwAdd">Add</button></div><div class="links">' + park + "</div>" + (np.panel === "park" ? panelHtml() : "");
+    } else {
+      let dots = "";
+      for (const x of subs) dots += '<i class="' + (x.d ? "d" : x === st ? "c" : "") + '"></i>';
+      h += '<h1 class="step">' + esc(st.t) + "</h1>" + (n ? '<p class="prog"><span>Step ' + (dn + 1) + " of " + n + '</span><span class="dots" aria-hidden="true">' + dots + "</span></p>" : "");
+      h += np.panel ? panelHtml() : timerBox(true) + '<div class="links"><button class="link" data-a="nwShrink">Make it smaller</button><button class="link" data-a="nwStuck">I’m stuck</button>' + park + '<button class="link" data-a="nwEdit">Edit task</button></div>';
+    }
+    h += it.est ? '<p class="guess"><span>Your guess: ' + dur(it.est) + " · tracked so far: " + dur((it.spent || 0) / 60) + '</span><button class="link" data-a="nwGuess" data-v="0">Change</button></p>'
+      : '<div class="guess"><span>Guess the whole task:</span>' + [[5, "5 min"], [15, "15 min"], [30, "30 min"], [60, "1 h"], [120, "2 h"]].map((g) => '<button class="chip" data-a="nwGuess" data-v="' + g[0] + '">' + g[1] + "</button>").join("") + "</div>";
+    if (n) h += '<details class="allsteps"><summary>All steps (' + n + ")</summary><ol>" + subs.map((x) => '<li class="' + (x.d ? "d" : x === st ? "c" : "") + '">' + esc(x.t) + "</li>").join("") +
+      '</ol><div class="inl"><input class="in" id="nwAdd" type="text" autocomplete="off" placeholder="Add a later step" aria-label="Add a later step"><button class="btn ghost" data-a="nwAdd">Add</button></div></details>';
+    h += "</div>";
+  }
+  const L = logs().filter((l) => dayKey(l.at, o) === t), mins = L.filter((l) => l.k === "focus").reduce((a, l) => a + (l.min || 0), 0);
+  h += '<div class="stats s3"><button class="card stat" data-a="foLog"><b>' + L.filter((l) => l.k === "focus").length + '</b><span>Sessions today ›</span></button><button class="card stat" data-a="foViz"><b>' + mins +
+    '</b><span>Minutes focused today ›</span></button><div class="card stat"><b>' + L.filter((l) => l.k === "step").length + "</b><span>Steps today</span></div></div>";
+  const hs = all("hist").sort((a, b) => a.at - b.at);
+  h += '<div class="sec">Guess vs. tracked time</div>';
+  if (!hs.length) h += '<p class="hint">Guess how long a task takes, run the timer while you do it, and finish it. Your real ratio shows up here.</p>';
+  else {
+    let e = 0, a = 0;
+    for (const x of hs) { e += x.est; a += x.actual; }
+    const r = a / e;
+    h += '<div class="card nowc"><p>Across ' + hs.length + (hs.length === 1 ? " task" : " tasks") + ", things took <b>" + r.toFixed(1) + "×</b> your guess." + (hs.length >= 3 && r > 1.15 ? " Multiply your next guess by " + r.toFixed(1) + "." : "") + "</p>" +
+      hs.slice(-6).reverse().map((x) => '<p class="hint" style="margin-top:6px"><b>' + (x.actual / x.est).toFixed(1) + "×</b> " + esc(x.title) + ": guessed " + dur(x.est) + ", tracked " + dur(x.actual) + "</p>").join("") + "</div>";
+  }
+  return h;
 }
 
 // ---------- shell ----------
 function drawTop() {
   const g = game(), o = O(), d = loc(Date.now(), o);
   const title = ui.tab === "today" ? WD[d.getUTCDay()] + " " + d.getUTCDate() + " " + MO[d.getUTCMonth()] : TABS.find((t) => t[0] === ui.tab)[1];
-  $("#top").innerHTML = '<div class="grow"><h1>' + title + '</h1><div class="sub">' + TITLES[Math.min(g.L, TITLES.length) - 1] + "</div></div>" +
+  const tmr = running() && ui.tab !== "focus" ? '<button class="hdt" id="hdt" data-a="tab" data-v="focus" aria-label="Go to the running timer">⏱ ' + mmss(fo.end ? fo.end - Date.now() : fo.left) + " left</button>" : "";
+  $("#top").innerHTML = '<div class="grow"><h1>' + title + '</h1><div class="sub">' + (tmr || TITLES[Math.min(g.L, TITLES.length) - 1]) + "</div></div>" +
     '<span class="pill fire" title="Day streak. ❄ are streak freezes that cover a missed day.">🔥 ' + g.streak + (g.freezes ? " · ❄" + g.freezes : "") + "</span>" +
     '<div class="lvl" title="' + g.xp + ' XP in total"><b>Lv ' + g.L + "<span>" + g.cur + "/" + g.need + '</span></b><div class="bar"><i style="width:' + Math.round((100 * g.cur) / g.need) + '%"></i></div></div>' +
     '<button class="ib" data-a="settings" aria-label="Settings">' + ICON.gear + '<span class="dot ' + dot + '"></span></button>';
 }
+// Names of current and past tasks and habits, offered while typing a name.
+function pastNames() {
+  const seen = new Set(), out = [];
+  for (const r of Object.values(db.recs).filter((x) => x.type === "item" || x.type === "habit").sort((a, b) => (b.u || 0) - (a.u || 0))) {
+    const n = String(r.title || r.name || "").trim(), k = n.toLowerCase();
+    if (n && !seen.has(k)) { seen.add(k); out.push(n); if (out.length >= 150) break; }
+  }
+  return out;
+}
 function render() {
   if (drag) { drag.stale = true; return; }
+  $("#names").innerHTML = pastNames().map((n) => '<option value="' + esc(n) + '">').join("");
   const main = $("#main"), a = document.activeElement, keep = a && a.id && main.contains(a) ? { id: a.id, v: a.value, s: a.selectionStart } : null, y = main.scrollTop;
   const qa = $("#qa"), qaVal = qa ? qa.value : "";
   $("#nav").innerHTML = '<div class="brand">Onward</div>' + TABS.map(([k, l]) => '<button data-a="tab" data-v="' + k + '"' + (ui.tab === k ? ' aria-current="page"' : "") + ">" + ICON[k] + "<span>" + l + "</span></button>").join("");
@@ -735,10 +930,10 @@ function remRow(r, i) {
 }
 function edBody() {
   const it = ed.it, t = today(), ev = it.kind === "event", wk = ed.rs === "w" || (ed.rs === "c" && ed.cu === "w");
-  return '<input class="in title" data-f="title" placeholder="' + (ev ? "What’s happening?" : "What needs doing?") + '" value="' + esc(it.title) + '"' + (ed.isNew ? " autofocus" : "") + ">" +
+  return '<input class="in title" data-f="title" list="names" autocomplete="off" placeholder="' + (ev ? "What’s happening?" : "What needs doing?") + '" value="' + esc(it.title) + '"' + (ed.isNew ? " autofocus" : "") + ">" +
     (ev ? "" : '<div class="f"><input class="in" data-f="step" placeholder="Tiniest first step (optional), e.g. “open the doc”" value="' + esc(it.step || "") + '" aria-label="First tiny step"></div>') +
     '<div class="f chips">' + chipBtn("edKind", "task", "Task", !ev) + chipBtn("edKind", "event", "Event", ev) + "</div>" +
-    '<div class="f"><label>When</label><div class="chips" style="margin-bottom:8px">' + [["", "No date"], [t, "Today"], [addDays(t, 1), "Tomorrow"], [addDays(t, 7), "Next week"]].map(([v, l]) => chipBtn("edDk", v, l, ed.dk === v)).join("") +
+    '<div class="f"><label>When</label><div class="chips" style="margin-bottom:8px">' + [["", "No date"], [t, "Today"], [addDays(t, 1), "Tomorrow"], [addDays(t, 7), "Next week"]].map(([v, l]) => chipBtn("edDk", v, l, ed.dk === v && !(v === "" && it.shelf))).join("") + (ev ? "" : chipBtn("edShelf", "1", "Meaning to", !!it.shelf && !ed.dk)) +
     '</div><div class="r2"><input class="in" type="date" data-f="dk" data-c="redraw" value="' + ed.dk + '" aria-label="Date"><input class="in" type="time" data-f="tm" data-c="redraw" value="' + ed.tm + '" aria-label="Time, leave empty for all day"></div>' +
     (ev && ed.tm ? '<select class="in" data-f="dur" style="margin-top:8px" aria-label="Length">' + opts([[15, "15 minutes long"], [30, "30 minutes long"], [45, "45 minutes long"], [60, "1 hour long"], [90, "1.5 hours long"], [120, "2 hours long"], [180, "3 hours long"], [240, "4 hours long"]], it.dur || 60) + "</select>" : "") +
     (ed.dk && !ed.tm ? '<p class="hint" style="margin-top:6px">No time set, so this is all day. Reminders count from ' + esc(set().alldayAt) + ".</p>" : "") + "</div>" +
@@ -756,6 +951,7 @@ function edBody() {
     '<div class="f"><label>Tags</label><input class="in" data-f="tags" placeholder="home, study" value="' + esc((it.tags || []).join(", ")) + '" aria-label="Tags, separated by commas"></div>' +
     (ev ? "" : '<div class="f"><label>Subtasks</label>' + it.subs.map((s, i) => '<div class="sub"><button class="chk" data-a="subT" data-i="' + i + '" aria-pressed="' + !!s.d + '" aria-label="Toggle subtask"></button><input class="in" type="text" data-f="sub" data-i="' + i + '" value="' + esc(s.t) + '" aria-label="Subtask"><button class="x" data-a="subDel" data-i="' + i + '" aria-label="Remove subtask">×</button></div>').join("") +
       '<div class="sub"><input class="in" type="text" id="subNew" data-f="subNew" placeholder="Add a step, then press Enter" aria-label="New subtask"><button class="btn soft sm" data-a="subAdd">Add</button></div></div>') +
+    (!ev && (it.left || it.spent) ? '<div class="f"><label>Where I left off</label><input class="in" data-f="left" value="' + esc(it.left || "") + '" aria-label="Where I left off">' + (it.spent ? '<p class="hint" style="margin-top:6px">Tracked so far: ' + dur(it.spent / 60) + (it.est ? " of a " + dur(it.est) + " guess" : "") + ".</p>" : "") + "</div>" : "") +
     '<div class="f"><label>Notes</label><textarea class="in" data-f="notes" aria-label="Notes">' + esc(it.notes || "") + "</textarea></div>" +
     '<div class="f r2"><button class="btn" data-a="closeSheet">Save</button>' + (ed.isNew ? '<button class="btn ghost" data-a="cancelSheet">Cancel</button>' : '<button class="btn danger" data-a="delItem">Delete</button>') + "</div>";
 }
@@ -765,6 +961,7 @@ function readForm() {
   for (const el of $$("#sheet [data-f]")) {
     const f = el.dataset.f, v = el.value, i = +el.dataset.i;
     if (f === "title" || f === "step" || f === "notes" || f === "list") it[f] = v;
+    else if (f === "left") it.left = v;
     else if (f === "dk" || f === "tm" || f === "rs" || f === "cu") ed[f] = v;
     else if (f === "cn") ed.cn = Math.max(1, Math.floor(+v) || 1);
     else if (f === "dur" || f === "nag" || f === "est") it[f] = +v;
@@ -786,6 +983,8 @@ function saveEd() {
   it.subs = it.subs.filter((s) => s.t.trim());
   it.rem = it.rem.map((r) => (r.at != null ? { id: r.id, at: r.at, ch: r.ch } : { id: r.id, off: r.off || 0, ch: r.ch }));
   if (e.rs && !e.dk) e.dk = today();
+  if (e.dk || it.kind === "event") it.shelf = 0;
+  if (it.shelf && !it.shelfAt) it.shelfAt = Date.now();
   if (e.dk) {
     it.allDay = !e.tm;
     it.at = e.tm ? keyTs(e.dk, o, ...e.tm.split(":").map(Number)) : keyTs(e.dk, o);
@@ -814,7 +1013,7 @@ function editHabit(id) {
 const sugHtml = () => suggestIcons(hd.name).filter((e) => e !== hd.icon).map((e) => '<button class="emo" data-a="hdIcon" data-v="' + e + '" aria-label="Use ' + e + '">' + e + "</button>").join("");
 function hdBody() {
   const freq = hd.freq || 1, tags = tagGroups(habits()).filter((g) => g.key && g.key !== tagKey(hd.tag)).map((g) => g.label);
-  return '<input class="in title" data-f="name" id="hdName" placeholder="e.g. Drink water" value="' + esc(hd.name) + '"' + (hd.isNew ? " autofocus" : "") + ">" +
+  return '<input class="in title" data-f="name" id="hdName" list="names" autocomplete="off" placeholder="e.g. Drink water" value="' + esc(hd.name) + '"' + (hd.isNew ? " autofocus" : "") + ">" +
     '<div class="f"><label>Icon</label><div class="iconrow"><input class="in icn" data-f="icon" maxlength="8" value="' + esc(hd.icon || "") + '" placeholder="🙂" aria-label="Icon, one emoji"><span id="hdSug">' + sugHtml() +
     '</span><button class="btn ghost sm" data-a="hdEmoji">' + (hd._em ? "Fewer" : "More") + "</button></div>" +
     (hd._em ? EMOJI_GROUPS.map(([n, list]) => '<div class="swl">' + n + '</div><div class="emojis">' + list.split(" ").map((e) => '<button class="emo" data-a="hdIcon" data-v="' + e + '" aria-label="Use ' + e + '">' + e + "</button>").join("") + "</div>").join("") : "") + "</div>" +
@@ -867,24 +1066,6 @@ function editList(id) {
     const isNew = l.isNew; delete l.isNew; delete l.body;
     put(l); if (isNew) ui.filter = "list:" + l.id;
   }, "Save");
-}
-
-// ---------- pick for me ----------
-let picked = [];
-function pickOne() {
-  const start = startToday(), q = quest(), qs = new Set(q.picks.map((p) => p.ref));
-  let c = items().filter((i) => i.kind === "task" && !i.done && (i.at == null || i.at < start + DAY));
-  if (!c.length) return toast("Nothing waiting. Add a task first.");
-  if (c.every((i) => picked.includes(i.id))) picked = [];
-  c = c.filter((i) => !picked.includes(i.id));
-  const w = c.map((i) => 1 + (qs.has(i.id) ? 3 : 0) + (i.pri || 0) + (i.energy === "low" ? 1 : 0) + (i.at != null ? 1 : 0));
-  let r = Math.random() * w.reduce((a, b) => a + b, 0), it = c[0];
-  for (let i = 0; i < c.length; i++) { r -= w[i]; if (r <= 0) { it = c[i]; break; } }
-  picked.push(it.id);
-  openSheet("Just this one", '<div class="lvup"><div class="big">👉</div><h2 style="font-size:24px;margin:8px 0">' + esc(it.title) + "</h2>" +
-    (it.step ? '<p style="color:var(--accent);font-weight:600">First step: ' + esc(it.step) + "</p>" : '<p class="hint">What is the smallest possible first move? Do only that.</p>') + "</div>" +
-    '<div class="f"><button class="btn" style="width:100%" data-a="pickFocus" data-id="' + it.id + '">Start with just 5 minutes</button></div>' +
-    '<div class="f r2"><button class="btn ghost" data-a="pickDone" data-id="' + it.id + '">Already done ✓</button><button class="btn ghost" data-a="pick">Not this one</button></div>', null, "Close");
 }
 
 // ---------- settings ----------
@@ -940,6 +1121,9 @@ function settingsBody() {
     '<span class="lab" style="margin-top:12px">Morning plan at</span><input class="in" type="time" data-s="digestAt" value="' + esc(s.digestAt || "") + '"><div style="height:8px"></div>' + chRow("sDigCh", s.digestCh) +
     '<p class="hint" style="margin-top:6px">One message a day with what is planned and what carried over. Clear the time to turn it off.</p></details>' +
 
+    '<details class="card grp"><summary>My day and the timer</summary><div class="r2"><div><span class="lab">Day starts</span><input class="in" type="time" data-s="dayStart" value="' + esc(s.dayStart) + '"></div><div><span class="lab">Day ends</span><input class="in" type="time" data-s="dayEnd" value="' + esc(s.dayEnd) + '"></div></div>' +
+    '<p class="hint" style="margin-top:6px">Sets the “left today” bar on the Today tab.</p><span class="lab" style="margin-top:12px">Chime while a timer runs</span><select class="in" data-s="chime">' + opts([[0, "Off"], [5, "Every 5 min"], [10, "Every 10 min"], [15, "Every 15 min"]], s.chime) + "</select></details>" +
+
     '<details class="card grp"><summary>Look and sound</summary><span class="lab">Theme</span><select class="in" data-s="theme">' + opts([["auto", "Match my device"], ["light", "Light"], ["dark", "Dark"]], s.theme) + "</select>" +
     '<span class="lab" style="margin-top:12px">Sounds</span><select class="in" data-s="sound">' + opts([["1", "On"], ["", "Off"]], s.sound ? "1" : "") + "</select></details>" +
 
@@ -951,7 +1135,10 @@ function settingsBody() {
     '<p class="hint" style="margin-top:12px">Or, if the old app never used sync: open it on your laptop, press F12, paste <code>copy(localStorage.getItem("tallyCounter.v1"))</code> into the Console, then paste the result here.</p>' +
     '<textarea class="in" id="sTj" style="margin-top:8px" placeholder="Paste tally data"></textarea><button class="btn ghost" style="margin-top:8px" data-a="tallyPaste">Import pasted data</button><div class="msg" id="mTally"></div></details>' +
 
-    '<details class="card grp"><summary>Backup</summary><div class="r2"><button class="btn ghost" data-a="exportData">Download backup</button><label class="btn ghost" style="cursor:pointer">Restore backup<input type="file" id="sFile" accept="application/json,.json" hidden></label></div><button class="btn danger sm" style="margin-top:12px" data-a="erase">Erase everything</button><div class="msg" id="mBak"></div></details>';
+    '<details class="card grp"><summary>Bring in my Foothold data</summary><p class="hint">In Foothold, open Done > Settings > “Copy a backup”, then paste it here. Tasks, steps, guesses, tracked time and “where you left off” notes come across. Example tasks are skipped. Safe to run twice.</p>' +
+    '<textarea class="in" id="sFh" style="margin-top:8px" placeholder="Paste the Foothold backup"></textarea><button class="btn" style="margin-top:8px" data-a="footholdPaste">Import</button><div class="msg" id="mFh"></div></details>' +
+
+    '<details class="card grp"><summary>Backup and reset</summary><div class="r2"><button class="btn ghost" data-a="exportData">Download backup</button><label class="btn ghost" style="cursor:pointer">Restore backup<input type="file" id="sFile" accept="application/json,.json" hidden></label></div><div class="r2" style="margin-top:12px"><button class="btn ghost sm" data-a="xpReset">Reset level and XP</button><button class="btn danger sm" data-a="erase">Erase everything</button></div><div class="msg" id="mBak"></div></details>';
 }
 async function openSettings() {
   openSheet("Settings", settingsBody(), null, "Close");
@@ -972,6 +1159,84 @@ async function pushOn() {
     await api("/api/push/sub", sub.toJSON());
     sMsg("mPush", "On. Tap “🔔 Push” below to send yourself a test.", "ok");
   } catch (e) { sMsg("mPush", "Could not turn on: " + e.message, "bad"); }
+}
+// ---------- focus history and charts ----------
+const focusName = (l) => { const r = db.recs[l.ref]; return r ? (r.icon ? r.icon + " " : "") + (r.title || r.name) : l.ref ? String(l.title || "").replace(/^Focused \d+ min:? ?/, "") || "Removed item" : "No specific task"; };
+const focusTags = (l) => { const r = db.recs[l.ref]; return !r ? [] : r.type === "habit" ? (r.tag ? [tagKey(r.tag)] : []) : (r.tags || []).map(tagKey); };
+function foLogBody() {
+  const o = O(), now = Date.now(), L = logs().filter((l) => l.k === "focus").sort((a, b) => b.at - a.at);
+  if (!L.length) return '<div class="empty">No sessions yet. Start a timer on the Now tab and it will be logged here.</div>';
+  let h = '<p class="hint">' + L.length + " sessions, " + dur(L.reduce((a, l) => a + (l.min || 0), 0)) + " in total.</p>", day = "";
+  for (const l of L.slice(0, 300)) {
+    const k = dayKey(l.at, o);
+    if (k !== day) {
+      const same = L.filter((x) => dayKey(x.at, o) === k);
+      h += (day ? "</div>" : "") + '<div class="sec">' + fmtDay(l.at, o, now) + ' <span class="n">' + same.length + (same.length === 1 ? " session · " : " sessions · ") + dur(same.reduce((a, x) => a + (x.min || 0), 0)) + '</span></div><div class="card list">';
+      day = k;
+    }
+    h += '<div class="hrow"><div class="rt"><div class="ti">' + esc(focusName(l)) + '</div><div class="me">' + fmtTime(l.at - (l.min || 0) * MIN, o) + " to " + fmtTime(l.at, o) + " · +" + (l.xp || 0) + ' XP</div></div><b>' + (l.min || 0) + ' min</b><button class="x" data-a="foLogDel" data-id="' + l.id + '" aria-label="Delete this session">×</button></div>';
+  }
+  return h + "</div>" + (L.length > 300 ? '<p class="hint" style="margin-top:8px">Showing the latest 300.</p>' : "");
+}
+const vz = { range: "week", kind: "all", tag: "" };
+function foVizBody() {
+  const o = O(), t = today(), now = Date.now(), all = logs().filter((l) => l.k === "focus");
+  const tags = [...new Set(all.flatMap(focusTags))].sort();
+  if (vz.tag && !tags.includes(vz.tag)) vz.tag = "";
+  let from, n, idx, lab, name;
+  if (vz.range === "today") { from = startToday(); n = 24; idx = (l) => loc(l.at, o).getUTCHours(); lab = (i) => (i % 6 === 0 ? (i % 12 || 12) + (i < 12 ? "am" : "pm") : ""); name = (i) => (i % 12 || 12) + (i < 12 ? " am" : " pm") + " to " + ((i + 1) % 12 || 12) + ((i + 1) % 24 < 12 ? " am" : " pm"); }
+  else if (vz.range === "week") { from = keyTs(addDays(t, -new Date(t + "T00:00:00Z").getUTCDay()), o); n = 7; idx = (l) => Math.floor((l.at - from) / DAY); lab = (i) => WD[i]; name = (i) => fmtDay(from + i * DAY, o, now); }
+  else { const [y, m] = t.split("-").map(Number); from = keyTs(t.slice(0, 8) + "01", o); n = new Date(Date.UTC(y, m, 0)).getUTCDate(); idx = (l) => +dayKey(l.at, o).slice(8) - 1; lab = (i) => (i % 7 === 0 ? String(i + 1) : ""); name = (i) => i + 1 + " " + MO[m - 1]; }
+  const to = vz.range === "today" ? from + DAY : vz.range === "week" ? from + 7 * DAY : from + n * DAY;
+  const L = all.filter((l) => l.at >= from && l.at < to).filter((l) => { const r = db.recs[l.ref]; return (vz.kind === "all" || (vz.kind === "task" ? r && r.type === "item" : r && r.type === "habit")) && (!vz.tag || focusTags(l).includes(vz.tag)); });
+  const bins = Array.from({ length: n }, () => ({ min: 0, c: 0 })), by = {}, byTag = {};
+  let total = 0;
+  for (const l of L) {
+    const b = bins[Math.min(n - 1, Math.max(0, idx(l)))], m = l.min || 0, nm = focusName(l);
+    b.min += m; b.c++; total += m; by[nm] = (by[nm] || 0) + m;
+    for (const g of focusTags(l)) byTag[g] = (byTag[g] || 0) + m;
+  }
+  const chip = (a, v, l, on) => '<button class="chip" data-a="' + a + '" data-v="' + esc(v) + '" aria-pressed="' + on + '">' + esc(l) + "</button>";
+  let h = '<div class="chips">' + [["today", "Today"], ["week", "This week"], ["month", "This month"]].map(([v, l]) => chip("vzRange", v, l, vz.range === v)).join("") + "</div>" +
+    '<div class="chips" style="margin-top:8px">' + [["all", "Everything"], ["task", "Tasks"], ["habit", "Habits"]].map(([v, l]) => chip("vzKind", v, l, vz.kind === v)).join("") + "</div>" +
+    (tags.length ? '<div class="chips scroll" style="margin-top:8px">' + chip("vzTag", "", "All tags", !vz.tag) + tags.map((g) => chip("vzTag", g, "#" + g, vz.tag === g)).join("") + "</div>" : "");
+  const active = bins.filter((b) => b.min).length, unit = vz.range === "today" ? "hour" : "day";
+  h += '<div class="vzhero"><b>' + dur(total) + "</b><span>" + L.length + (L.length === 1 ? " session" : " sessions") + (active > 1 ? " · about " + dur(total / active) + " per active " + unit : "") + "</span></div>";
+  // One series, so one colour. Thin bars with rounded tops on a baseline; the tallest bar carries the only value label.
+  const W = 320, H = 150, padL = 4, padB = 18, padT = 16, max = Math.max(...bins.map((b) => b.min), 1), slot = (W - padL * 2) / n, bw = Math.max(2, Math.min(26, slot - 2)), top = bins.findIndex((b) => b.min === max && b.min > 0);
+  let bars = "";
+  bins.forEach((b, i) => {
+    const x = padL + i * slot + (slot - bw) / 2, bh = b.min ? Math.max(2, ((H - padB - padT) * b.min) / max) : 0, y = H - padB - bh, r = Math.min(4, bw / 2, bh);
+    if (bh) bars += '<path class="vbar" d="M' + x.toFixed(1) + " " + (H - padB) + "V" + (y + r).toFixed(1) + "q0 -" + r + " " + r + " -" + r + "h" + (bw - 2 * r).toFixed(1) + "q" + r + " 0 " + r + " " + r + "V" + (H - padB) + 'z"/>';
+    if (i === top) bars += '<text class="vval" x="' + (x + bw / 2).toFixed(1) + '" y="' + (y - 4).toFixed(1) + '" text-anchor="middle">' + b.min + "</text>";
+    if (lab(i)) bars += '<text class="vlab" x="' + (x + bw / 2).toFixed(1) + '" y="' + (H - 4) + '" text-anchor="middle">' + lab(i) + "</text>";
+    bars += '<rect class="vhit" x="' + (padL + i * slot).toFixed(1) + '" y="0" width="' + slot.toFixed(1) + '" height="' + (H - padB) + '" data-tip="' + esc(name(i) + ": " + (b.min ? dur(b.min) + ", " + b.c + (b.c === 1 ? " session" : " sessions") : "nothing logged")) + '" tabindex="0"/>';
+  });
+  h += '<div class="card vz"><svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="Minutes focused per ' + unit + '"><line class="vgrid" x1="0" x2="' + W + '" y1="' + padT + '" y2="' + padT + '"/><line class="vbase" x1="0" x2="' + W + '" y1="' + (H - padB) + '" y2="' + (H - padB) + '"/>' + bars +
+    '</svg><p class="hint" id="vzTip">' + (total ? "Tap a bar for its numbers. Minutes per " + unit + "." : "Nothing logged for this view yet.") + "</p></div>";
+  const table = (title, obj) => {
+    const rows = Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, 8), mx = rows.length ? rows[0][1] : 1;
+    return rows.length ? '<div class="sec">' + title + '</div><div class="card vz">' + rows.map(([k, v]) => '<div class="vrow"><span>' + esc(k) + '</span><i><b style="width:' + Math.max(2, Math.round((100 * v) / mx)) + '%"></b></i><em>' + dur(v) + "</em></div>").join("") + "</div>" : "";
+  };
+  return h + table("By task or habit", by) + table("By tag", Object.fromEntries(Object.entries(byTag).map(([k, v]) => ["#" + k, v])));
+}
+function importFoothold(d) {
+  if (!d || !Array.isArray(d.tasks) || !d.settings) throw new Error("not a backup");
+  const o = O(), t = today();
+  let n = 0;
+  for (const x of d.tasks) {
+    const id = "f-" + x.id;
+    if (x.example || !x.id || db.recs[id]) continue;
+    const dk = (x.wake && x.wake > t ? x.wake : x.due) || (x.bucket === "today" ? t : "");
+    const rep = x.repeat === "daily" ? { f: "d", n: 1 } : x.repeat === "weekdays" ? { f: "w", n: 1, days: [1, 2, 3, 4, 5] } : x.repeat === "weekly" ? { f: "w", n: 1 } : null;
+    put(newItem({ id, title: String(x.title || "Untitled"), subs: (x.steps || []).map((y) => ({ id: uid(), t: String(y.text || ""), d: y.done ? 1 : 0 })), est: +x.est || 0, spent: +x.spent || 0, left: String(x.note || ""),
+      at: dk ? keyTs(dk, o) : null, allDay: true, rep, done: x.doneAt || null, created: x.createdAt || Date.now(), rem: [] }));
+    n++;
+  }
+  for (const h of d.history || []) { const id = "fh-" + h.at; if (h.at && h.est && !db.recs[id]) put({ id, type: "hist", title: String(h.title || ""), est: +h.est, actual: +h.actual || 1, at: h.at }); }
+  const s = set(), fs = d.settings;
+  put({ ...s, dayStart: fs.dayStart || s.dayStart, dayEnd: fs.dayEnd || s.dayEnd, chime: fs.check != null ? +fs.check : s.chime });
+  return n;
 }
 function entriesBody() {
   const es = all("entry").sort((a, b) => b.at - a.at), o = O();
@@ -1013,14 +1278,14 @@ function toast(msg, undo) {
   setTimeout(() => el.remove(), undo ? 6000 : 3500);
 }
 let actx = null;
-function beep(freqs, len = 0.12) {
+function beep(freqs, len = 0.12, vol = 0.18, type = "sine") {
   if (!set().sound) return;
   try {
     actx = actx || new (window.AudioContext || window.webkitAudioContext)();
     if (actx.state === "suspended") actx.resume();
     freqs.forEach((f, i) => {
       const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime + i * len;
-      o.type = "sine"; o.frequency.value = f; g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.18, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+      o.type = type; o.frequency.value = f; g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + len);
       o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + len + 0.02);
     });
   } catch (e) {}
@@ -1065,7 +1330,8 @@ function ring(rec) {
   $("#ring").hidden = false;
   if (!hasLayer("ring")) pushLayer("ring", () => ringStop(true));
   clearInterval(ringT);
-  const buzz = () => { beep([880, 880, 1175, 880], 0.16); if (navigator.vibrate) navigator.vibrate([400, 150, 400]); };
+  // Full volume and a harsher tone, so it is as loud as the phone's media volume allows.
+  const buzz = () => { beep([880, 1175, 880, 1175, 880, 1175], 0.2, 1, "square"); if (navigator.vibrate) navigator.vibrate([500, 150, 500, 150, 500]); };
   buzz(); ringT = setInterval(buzz, 1500);
   setTimeout(() => { if (ringRec === rec) clearInterval(ringT); }, 5 * MIN);
 }
@@ -1094,16 +1360,21 @@ const A = {
   edit(el) { editItem(el.dataset.id); },
   qaAdd() {
     const inp = $("#qa"), text = inp.value.trim();
-    if (!text) { editItem(null, ui.tab === "cal" ? { at: keyTs(ui.sel, O()) } : {}); return; }
-    const f = ui.filter, ctx = ui.tab === "cal" ? { dk: ui.sel } : ui.tab === "tasks" ? { list: f.startsWith("list:") ? f.slice(5) : "", tag: f.startsWith("tag:") ? f.slice(4) : "" } : {};
+    if (!text) { editItem(null, ui.tab === "cal" ? { at: keyTs(ui.sel, O()) } : ui.tab === "tasks" && ui.filter === "shelf" ? { shelf: 1, rem: [] } : {}); return; }
+    const f = ui.filter, ctx = ui.tab === "cal" ? { dk: ui.sel } : ui.tab === "tasks" ? { list: f.startsWith("list:") ? f.slice(5) : "", tag: f.startsWith("tag:") ? f.slice(4) : "", shelf: f === "shelf" } : {};
     const fields = quickFields(text, ctx);
     if (!fields.title) return;
+    const old = Object.values(db.recs).filter((r) => r.type === "item" && String(r.title).toLowerCase() === fields.title.toLowerCase()).sort((a, b) => (b.u || 0) - (a.u || 0))[0];
+    if (old) { // same name as before: start with the same list, tags, priority, estimate and steps
+      if (!fields.list) fields.list = listOf(old) ? old.list : "";
+      if (!fields.tags.length) fields.tags = [...(old.tags || [])];
+      if (!fields.pri) fields.pri = old.pri || 0;
+      Object.assign(fields, { est: old.est || 0, energy: old.energy || "", step: old.step || "", subs: (old.subs || []).map((x) => ({ id: uid(), t: x.t, d: 0 })) });
+    }
     put(newItem(fields)); inp.value = ""; $("#qap").textContent = "";
     beep([660]); done(); $("#qa").focus();
   },
-  pick: () => pickOne(),
-  pickFocus(el) { closeSheet(true); fo = { ref: el.dataset.id, min: 5, end: Date.now() + 5 * MIN }; saveFo(); setTab("focus", "fwd"); },
-  pickDone(el) { closeSheet(true); toggleTask(el.dataset.id, null); done(); },
+  pick() { if (pickNow()) setTab("focus", "fwd"); },
   questOpen(el) { const p = quest().picks[+el.dataset.i], r = p && db.recs[p.ref]; if (!r || r.del) return; if (p.t === "habit") { tickHabit(r.id, 1, el); done(); } else editItem(r.id); },
   lateToday() {
     const o = O(), now = Date.now(), t = today(), start = startToday();
@@ -1193,13 +1464,86 @@ const A = {
     if (v === 1) { beep([700], 0.05); if (navigator.vibrate) navigator.vibrate(10); }
     render();
   },
-  foStart(el) { fo = { ref: $("#foRef").value, min: +el.dataset.v, end: Date.now() + +el.dataset.v * MIN }; saveFo(); beep([523]); render(); },
-  foPause() { if (fo.end) { fo.left = fo.end - Date.now(); fo.end = 0; } else { fo.end = Date.now() + fo.left; fo.left = 0; } saveFo(); render(); },
+  foStart(el) { foStart(+el.dataset.v, !!el.dataset.s); render(); },
+  foPause() { if (fo.end) { fo.left = fo.end - Date.now(); fo.end = 0; wakeOff(); } else { fo.end = Date.now() + fo.left; fo.left = 0; wakeOn(); } saveFo(); render(); },
   foStop: () => foFinish(true),
-  foReset() { fo = fo && fo.ref ? { ref: fo.ref } : null; saveFo(); document.title = "Onward"; toast("Timer reset. Nothing was logged."); render(); },
+  foReset() { fo = null; saveFo(); wakeOff(); document.title = "Onward"; toast("Timer reset. Nothing was logged."); render(); },
+  foClear() { fo = null; saveFo(); render(); },
+  nwPick() { pickNow(); render(); },
+  nwAnother() { pickNow(); render(); },
+  nwSet(el) { np.skip = []; setNow(el.dataset.id, ""); render(); },
+  nwEdit() { editItem(nw.id); },
+  nwClose() { np.panel = ""; np.stuck = ""; render(); },
+  nwFirst() { const v = $("#nwFirst").value.trim(), it = nowTask(); if (!v || !it) return; put({ ...it, subs: [{ id: uid(), t: v, d: 0 }] }); render(); },
+  nwOne() { const it = nowTask(); if (it) put({ ...it, subs: [{ id: uid(), t: it.title, d: 0 }] }); render(); },
+  nwAdd() { const el = $("#nwAdd"), v = el.value.trim(), it = nowTask(); if (!v || !it) return; el.value = ""; put({ ...it, subs: [...(it.subs || []), { id: uid(), t: v, d: 0 }] }); render(); },
+  nwStepDone(el) {
+    const it = nowTask(); if (!it) return;
+    const subs = (it.subs || []).map((x) => ({ ...x })), i = subs.findIndex((x) => !x.d), before = game().L;
+    let text = "";
+    if (i >= 0) { subs[i].d = 1; text = subs[i].t; } else if (it.step) { subs.push({ id: uid(), t: it.step, d: 1 }); text = it.step; } else return;
+    put({ ...it, subs, step: i < 0 ? "" : it.step });
+    put({ id: "l" + uid(), type: "log", k: "step", ref: it.id, title: text, at: Date.now(), xp: 2 });
+    if (fo && fo.ended) { fo = null; saveFo(); }
+    celebrate(2, el, before, false); done();
+  },
+  nwFinish(el) { const id = nw.id; if (running()) foFinish(true, true); toggleTask(id, el); nw = { id: "", why: "" }; saveNw(); np.skip = []; done(); },
+  nwShrink() { openShrink("What is a smaller first piece of this?"); render(); const e = $("#nwShrink"); if (e) e.focus(); },
+  nwShrinkGo() {
+    const v = $("#nwShrink").value.trim(), it = nowTask(); if (!v || !it) return;
+    const subs = (it.subs || []).slice(), i = subs.findIndex((x) => !x.d);
+    if (!subs.length && it.step) subs.push({ id: uid(), t: it.step, d: 0 });
+    subs.splice(i < 0 ? 0 : i, 0, { id: uid(), t: v, d: 0 });
+    put({ ...it, subs, step: "" }); np.panel = ""; np.stuck = ""; render();
+  },
+  nwPark() { np.panel = "park"; render(); const e = $("#nwPark"); if (e) e.focus(); },
+  nwParkGo() {
+    const it = nowTask(), v = $("#nwPark").value.trim(); if (!it) return;
+    if (running()) foFinish(true, true);
+    put({ ...db.recs[it.id], left: v }); np.skip = [it.id]; np.panel = ""; nw = { id: "", why: "" }; saveNw(); fo = null; saveFo();
+    toast("Parked: " + it.title + ". It will be here when you come back."); render();
+  },
+  nwStuck() { np.panel = "stuck"; np.stuck = ""; render(); },
+  nwReason(el) { const r = STUCK[el.dataset.v]; if (r.go) { r.go(); render(); const e = $("#nwShrink"); if (e) e.focus(); } else { np.stuck = el.dataset.v; render(); } },
+  nwTactic() { const r = STUCK[np.stuck]; np.panel = ""; np.stuck = ""; r.act(); render(); },
+  nwGuess(el) { const it = nowTask(); if (it) put({ ...it, est: +el.dataset.v }); render(); },
+  foLog() { openSheet("Focus sessions", foLogBody(), null, "Close"); },
+  foLogDel(el) { del(el.dataset.id); setBody(foLogBody()); },
+  foViz() { openSheet("Minutes focused", foVizBody(), null, "Close"); },
+  vzRange(el) { vz.range = el.dataset.v; setBody(foVizBody()); },
+  vzKind(el) { vz.kind = el.dataset.v; setBody(foVizBody()); },
+  vzTag(el) { vz.tag = el.dataset.v; setBody(foVizBody()); },
+  xpReset(el) {
+    if (!el.dataset.armed) { el.dataset.armed = "1"; el.textContent = "Tap again to go back to level 1"; return; }
+    const s = set(), prev = s.xpOff || 0, total = logs().reduce((a, l) => a + (l.xp || 0), 0);
+    put({ ...s, xpOff: total }); closeSheet(true);
+    toast("Level and XP reset. Your streak and history are kept.", () => put({ ...set(), xpOff: prev }));
+  },
+  dump() { openSheet("Brain dump", '<p class="hint" style="margin-bottom:8px">Write down whatever is taking up space in your head. Sorting comes later. Everything lands in your Inbox.</p>' + dumpForm(), null, "Close"); const e = $("#dumpText"); if (e) e.focus(); },
+  dumpGo() {
+    const lines = $("#dumpText").value.split(/\n+/).map((x) => x.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim()).filter(Boolean);
+    if (!lines.length) return;
+    for (const l of lines) put(newItem({ title: l }));
+    if (!$("#sheet").hidden) closeSheet(true);
+    toast("Added " + lines.length + (lines.length === 1 ? " task" : " tasks") + " to your Inbox."); done();
+  },
   // editor
   edKind(el) { readForm(); ed.it.kind = el.dataset.v; setBody(edBody()); },
-  edDk(el) { readForm(); ed.dk = el.dataset.v; if (!ed.dk) ed.tm = ""; setBody(edBody()); },
+  edDk(el) { readForm(); ed.dk = el.dataset.v; ed.it.shelf = 0; if (!ed.dk) ed.tm = ""; setBody(edBody()); },
+  edShelf() { readForm(); ed.it.shelf = 1; ed.dk = ""; ed.tm = ""; ed.rs = ""; ed.it.rem = []; setBody(edBody()); },
+  shToday(el) { const it = db.recs[el.dataset.id]; put({ ...it, shelf: 0, at: startToday(), allDay: true }); shelfAnswered(); toast("On today’s list. One small step is enough."); done(); },
+  shNo(el) { put({ ...db.recs[el.dataset.id], offAt: today() }); shelfAnswered(); toast("No problem. It will wait."); render(); },
+  shKeep(el) { put({ ...db.recs[el.dataset.id], offAt: today(), askAt: Date.now() }); shelfAnswered(); toast("Kept. It stays on the shelf."); render(); },
+  shDrop(el) { const prev = db.recs[el.dataset.id]; del(prev.id); shelfAnswered(); toast("Let go. That was a decision, not a failure.", () => put({ ...prev, del: 0 })); done(); },
+  shSmall(el) {
+    const it = db.recs[el.dataset.id];
+    put({ ...it, shelf: 0, at: startToday(), allDay: true, askAt: Date.now() }); shelfAnswered();
+    np.skip = []; setNow(it.id, "");
+    // With no steps yet, Now already asks for a first tiny step; otherwise open "make it smaller".
+    if ((it.subs || []).length || it.step) openShrink("What is a smaller first piece of this?");
+    setTab("focus", "fwd");
+    const e = $("#nwShrink") || $("#nwFirst"); if (e) e.focus();
+  },
   edWd(el) { readForm(); const d = +el.dataset.v; ed.days = ed.days.includes(d) ? ed.days.filter((x) => x !== d) : [...ed.days, d]; setBody(edBody()); },
   edPri(el) { readForm(); ed.it.pri = +el.dataset.v; setBody(edBody()); },
   edEn(el) { readForm(); ed.it.energy = el.dataset.v; setBody(edBody()); },
@@ -1270,6 +1614,10 @@ const A = {
     try { const n = importTally(JSON.parse($("#sTj").value)); sMsg("mTally", "Imported " + n + " habits with their history.", "ok"); }
     catch (e) { sMsg("mTally", "Could not read that: " + e.message, "bad"); }
   },
+  footholdPaste() {
+    try { const n = importFoothold(JSON.parse($("#sFh").value)); sMsg("mFh", "Imported " + n + (n === 1 ? " task." : " tasks."), "ok"); }
+    catch (e) { sMsg("mFh", "That text is not a Foothold backup. Paste the whole thing you copied.", "bad"); }
+  },
   exportData() {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([JSON.stringify({ app: "onward", at: Date.now(), recs: Object.values(db.recs) })], { type: "application/json" }));
@@ -1300,11 +1648,11 @@ document.addEventListener("change", (e) => {
   const el = e.target;
   if (el.dataset.c && C[el.dataset.c]) return C[el.dataset.c](el);
   if (el.dataset.s) {
-    const k = el.dataset.s, v = k === "defOff" ? +el.value : k === "sound" ? !!el.value : el.value;
+    const k = el.dataset.s, v = k === "defOff" || k === "chime" ? +el.value : k === "sound" ? !!el.value : el.value;
     put({ ...set(), [k]: v }); if (k === "theme") applyTheme();
   }
   if (el.id === "tapLabel") { const s = set(); put({ ...s, tap: { ...s.tap, label: el.value } }); }
-  if (el.id === "foRef" && fo) { fo.ref = el.value; saveFo(); } else if (el.id === "foRef") { fo = { ref: el.value }; saveFo(); }
+  if (el.id === "foRef") ui.foRef = el.value;
   if (el.id === "sFile" && el.files[0]) el.files[0].text().then((t) => {
     const d = JSON.parse(t);
     if (!d || d.app !== "onward" || !Array.isArray(d.recs)) throw new Error("not a Onward backup");
@@ -1322,6 +1670,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && el.id === "qa") { e.preventDefault(); A.qaAdd(); }
   else if (e.key === "Enter" && el.id === "subNew") { e.preventDefault(); A.subAdd(); }
   else if (e.key === "Enter" && (el.id === "hdName" || (el.dataset && el.dataset.f === "title"))) { e.preventDefault(); closeSheet(); }
+  else if (e.key === "Enter" && { nwFirst: 1, nwAdd: 1, nwShrink: 1, nwPark: 1 }[el.id]) { e.preventDefault(); A[{ nwFirst: "nwFirst", nwAdd: "nwAdd", nwShrink: "nwShrinkGo", nwPark: "nwParkGo" }[el.id]](); }
   else if (e.key === "Enter" && el.id === "eName") { e.preventDefault(); A.tapSaveGo({ dataset: { v: "0" } }); }
   else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && el.classList && el.classList.contains("grip")) { e.preventDefault(); moveHabit(el.dataset.id, e.key === "ArrowUp" ? -1 : 1); }
   else if ((e.key === "Enter" || e.key === " ") && el.getAttribute && el.getAttribute("role") === "button") { e.preventDefault(); el.click(); }
@@ -1386,6 +1735,11 @@ $("#main").addEventListener("touchend", (e) => {
   if (j >= 0 && j < TABS.length) setTab(TABS[j][0], dx < 0 ? "fwd" : "back");
 }, { passive: true });
 
+const showTip = (e) => { const el = e.target.closest && e.target.closest("[data-tip]"), out = $("#vzTip"); if (el && out) { out.textContent = el.dataset.tip; $$(".vhit.on").forEach((x) => x.classList.remove("on")); el.classList.add("on"); } };
+document.addEventListener("pointerover", showTip);
+document.addEventListener("focusin", showTip);
+document.addEventListener("click", showTip);
+
 // ================= boot =================
 function applyTheme() { const t = set().theme; if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t); }
 function openFromLink(id, alarm) {
@@ -1397,13 +1751,17 @@ applyTheme();
 if (db.recs.settings && db.recs.settings.tzOff !== DEF.tzOff) put({ ...set(), tzOff: DEF.tzOff });
 render();
 window.addEventListener("pagehide", () => { if (saveT) flush(); });
-document.addEventListener("visibilitychange", () => { if (document.hidden) { if (saveT) flush(); } else { sync(); render(); } });
+document.addEventListener("visibilitychange", () => { if (document.hidden) { if (saveT) flush(); } else { sync(); render(); if (fo && fo.end) wakeOn(); } });
 window.addEventListener("online", sync);
 setInterval(() => { if (!document.hidden) sync(); }, 60000);
 setInterval(foTick, 500);
 setInterval(checkAlarms, 10000);
 let lastDay = today();
-setInterval(() => { if (today() !== lastDay) { lastDay = today(); memo = null; render(); } }, 30000);
+setInterval(() => {
+  if (today() !== lastDay) { lastDay = today(); memo = null; render(); }
+  const lab = $("#dayLab"); if (lab) { const dl = dayLeft(); lab.textContent = dl.label; $("#dayFill").style.width = dl.pct + "%"; }
+}, 30000);
+if (fo && fo.end) wakeOn();
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
   navigator.serviceWorker.addEventListener("message", (e) => {
