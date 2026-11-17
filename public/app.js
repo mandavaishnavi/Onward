@@ -13,7 +13,7 @@ const lsSet = (k, v) => { try { localStorage.setItem(k, v); return true; } catch
 
 const DEF = { id: "settings", type: "settings", tzOff: -new Date().getTimezoneOffset(), alldayAt: "09:00",
   defOff: 0, defCh: ["push"], digestAt: "08:30", digestCh: ["push"], sound: true, theme: "auto", tap: { label: "", value: 0 },
-  dayStart: "08:00", dayEnd: "00:00", chime: 10 };
+  dayStart: "08:00", dayEnd: "00:00", chime: 10, waterGoal: 2500, sleepGoal: 480, stepGoal: 8000, wUnit: "kg", wGoal: 0, waterRem: { on: false, from: "09:00", to: "21:00", every: 120, ch: ["push"] } };
 const CHS = [["push", "🔔 Push"], ["alarm", "⏰ Alarm"], ["tg", "✈️ Telegram"], ["email", "✉️ Email"]];
 const PRE = [0, 5, 10, 15, 30, 60, 120, 1440, 2880, 10080];
 // The three tally-counter palettes, each with brown, teal, turquoise and olive added.
@@ -90,6 +90,7 @@ const ICON = {
   tasks: '<svg viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg>',
   cal: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
   habits: '<svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0114-5l2 2M20 4v5h-5M20 12a8 8 0 01-14 5l-2-2M4 20v-5h5"/></svg>',
+  body: '<svg viewBox="0 0 24 24"><path d="M12 20s-7-4.5-8.500-9A4.500 4.500 0 0112 6.500 4.500 4.500 0 0120.500 11C19 15.500 12 20 12 20z"/></svg>',
   focus: '<svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/></svg>',
   gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3h.1a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8v.1a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>',
 };
@@ -422,10 +423,145 @@ function quickPreview(text) {
   return out.join("  ·  ");
 }
 
+// ================= body: water, sleep, steps, weight =================
+const BODY = { water: ["💧", "Water", "waterGoal"], sleep: ["😴", "Sleep", "sleepGoal"], steps: ["👣", "Steps", "stepGoal"], weight: ["⚖️", "Weight", ""] };
+const BKEYS = ["water", "sleep", "steps", "weight"];
+const bodyOn = (k) => { const r = db.recs["b-" + k]; return r && !r.del ? r : null; };
+const bodyVal = (k, m) => { const r = bodyOn(k); return r && r[m] != null ? r[m] : null; };
+const nf = (n) => Math.round(n).toLocaleString("en-IN");
+const fmtSleep = (m) => Math.floor(m / 60) + "h" + (m % 60 ? " " + (m % 60) + "m" : "");
+const lb = () => set().wUnit === "lb";
+const toKg = (v) => (lb() ? v / 2.20462 : v);
+const fmtW = (kg) => (Math.round((lb() ? kg * 2.20462 : kg) * 10) / 10) + " " + (lb() ? "lb" : "kg");
+const bfmt = (m, v) => m === "water" ? nf(v) + " ml" : m === "sleep" ? fmtSleep(v) : m === "steps" ? nf(v) : fmtW(v);
+function parseSleep(s) {
+  s = String(s).trim().toLowerCase().replace(/\s+/g, ""); let m;
+  if ((m = s.match(/^(\d{1,2}):(\d{2})$/))) return +m[1] * 60 + +m[2];
+  if ((m = s.match(/^(\d+(?:\.\d+)?)h(?:ours?|rs?)?(?:(\d{1,2})m?(?:in)?)?$/))) return Math.round(+m[1] * 60 + (+m[2] || 0));
+  if ((m = s.match(/^(\d+)m(?:in)?$/))) return +m[1];
+  if ((m = s.match(/^(\d+(?:\.\d+)?)$/))) return Math.round(+m[1] < 24 ? +m[1] * 60 : +m[1]);
+  return null;
+}
+function parseNum(s, m) {
+  s = String(s).trim().toLowerCase().replace(/,/g, ""); let k = 1;
+  if (m === "steps" && /k$/.test(s)) { k = 1000; s = s.slice(0, -1); }
+  if (!/^\d+(\.\d+)?$/.test(s)) return null;
+  return +s * k;
+}
+function bodyParse(m, s) {
+  const v = m === "sleep" ? parseSleep(s) : parseNum(s, m);
+  if (v == null || !(v > 0)) return null;
+  if (m === "sleep") return v <= 1440 ? v : null;
+  if (m === "water") return v <= 20000 ? Math.round(v) : null;
+  if (m === "steps") return v <= 200000 ? Math.round(v) : null;
+  const kg = toKg(v); return kg >= 20 && kg <= 400 ? Math.round(kg * 100) / 100 : null;
+}
+// Sets one reading for a day (null clears it). Reaching a goal is worth 5 XP, and drops back out if the number falls under it.
+function bodySet(k, m, v) {
+  const r = bodyOn(k), n = { ...(r || { id: "b-" + k, type: "body", day: k }) };
+  if (v == null) delete n[m]; else n[m] = v;
+  if (BKEYS.some((x) => n[x] != null)) put(n); else if (r) del(r.id);
+  const s = set(), o = O();
+  for (const x of ["water", "sleep", "steps"]) {
+    const id = "bg-" + x + "-" + k, val = bodyVal(k, x), met = val != null && val >= s[BODY[x][2]], l = db.recs[id];
+    if (met && (!l || l.del)) put({ id, type: "log", k: "bonus", title: BODY[x][1] + " goal reached", at: k === today() ? Date.now() : keyTs(k, o) + 12 * 3600e3, xp: 5 });
+    else if (!met && l && !l.del) del(id);
+  }
+}
+const bodyDays = (n) => { const o = O(), t = today(), out = []; for (let i = n - 1; i >= 0; i--) out.push(addDays(t, -i)); return out; };
+const bodySeries = (m, n) => bodyDays(n).map((k) => [k, bodyVal(k, m)]);
+function bodyAvg(m, n) { const v = bodySeries(m, n).map((x) => x[1]).filter((x) => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; }
+function bodyHit(m, n) { const g = set()[BODY[m][2]], d = bodySeries(m, n); return [d.filter((x) => x[1] != null && x[1] >= g).length, d.filter((x) => x[1] != null).length]; }
+const shortDay = (k) => { const d = new Date(k + "T00:00:00Z"); return d.getUTCDate() + " " + MO[d.getUTCMonth()]; };
+
+function bodyBars(m, n) {
+  const g = set()[BODY[m][2]], d = bodySeries(m, n), W = 300, H = 96, bw = W / n, mx = Math.max(g, ...d.map((x) => x[1] || 0), 1) * 1.08, gy = H - (g / mx) * H;
+  let s = '<svg class="bchart" viewBox="0 0 ' + W + " " + (H + 16) + '" role="img" aria-label="' + BODY[m][1] + ' over the last ' + n + ' days"><line x1="0" x2="' + W + '" y1="' + gy.toFixed(1) + '" y2="' + gy.toFixed(1) + '" class="bgoal"/>';
+  d.forEach(([k, v], i) => {
+    const x = i * bw + bw * 0.2, w = bw * 0.6;
+    if (v != null) { const h = Math.max(2, (v / mx) * H); s += '<rect x="' + x.toFixed(1) + '" y="' + (H - h).toFixed(1) + '" width="' + w.toFixed(1) + '" height="' + h.toFixed(1) + '" rx="3" class="' + (v >= g ? "bhit" : "bmiss") + '"><title>' + shortDay(k) + ": " + bfmt(m, v) + "</title></rect>"; }
+    else s += '<rect x="' + x.toFixed(1) + '" y="' + (H - 2) + '" width="' + w.toFixed(1) + '" height="2" rx="1" class="bnone"/>';
+  });
+  s += '<text x="0" y="' + (H + 12) + '" class="blab">' + shortDay(d[0][0]) + '</text><text x="' + W + '" y="' + (H + 12) + '" text-anchor="end" class="blab">Today</text></svg>';
+  return s + '<div class="bkey"><i class="bhit"></i> goal reached <i class="bmiss"></i> under <span class="bgl"></span> goal</div>';
+}
+function bodyLine(n) {
+  const pts = bodySeries("weight", n).map(([k, v], i) => [i, v]).filter((p) => p[1] != null);
+  if (pts.length < 2) return '<p class="hint">Log your weight on two different days to see the trend.</p>';
+  const g = set().wGoal || 0, vs = pts.map((p) => p[1]).concat(g ? [g] : []), lo = Math.min(...vs), hi = Math.max(...vs), pad_ = Math.max(0.5, (hi - lo) * 0.15), a = lo - pad_, b = hi + pad_, W = 300, H = 96;
+  const X = (i) => 6 + (i / (n - 1)) * (W - 12), Y = (v) => H - ((v - a) / (b - a)) * H;
+  let s = '<svg class="bchart" viewBox="0 0 ' + W + " " + (H + 16) + '" role="img" aria-label="Weight over the last ' + n + ' days">';
+  if (g) s += '<line x1="0" x2="' + W + '" y1="' + Y(g).toFixed(1) + '" y2="' + Y(g).toFixed(1) + '" class="bgoal"/>';
+  s += '<polyline points="' + pts.map((p) => X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1)).join(" ") + '" class="bline"/>';
+  for (const p of pts) s += '<circle cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="3.2" class="bdot"><title>' + shortDay(addDays(today(), p[0] - (n - 1))) + ": " + fmtW(p[1]) + "</title></circle>";
+  s += '<text x="0" y="' + (H + 12) + '" class="blab">' + shortDay(addDays(today(), -(n - 1))) + '</text><text x="' + W + '" y="' + (H + 12) + '" text-anchor="end" class="blab">Today</text></svg>';
+  return s;
+}
+const lastWeight = (before) => { const ks = Object.values(db.recs).filter((r) => r.type === "body" && !r.del && r.weight != null && (!before || r.day < before)).sort((a, b) => (a.day < b.day ? 1 : -1)); return ks[0] || null; };
+
+function bodyCard(m) {
+  const s = set(), t = today(), v = bodyVal(t, m), g = s[BODY[m][2]], [ic, nm] = BODY[m];
+  let top, ctl = "";
+  if (m === "weight") {
+    const cur = v != null ? { day: t, weight: v } : lastWeight(), prev = lastWeight(cur ? cur.day : t);
+    top = cur ? "<b>" + fmtW(cur.weight) + "</b>" + (cur.day !== t ? ' <span class="muted">· ' + shortDay(cur.day) + "</span>" : "") : '<span class="muted">Not logged yet</span>';
+    const sub = [];
+    if (cur && prev) { const dl = cur.weight - prev.weight; sub.push((dl > 0 ? "+" : dl < 0 ? "−" : "±") + fmtW(Math.abs(dl)) + " since " + shortDay(prev.day)); }
+    if (cur && s.wGoal) { const left = cur.weight - s.wGoal; sub.push(Math.abs(left) < 0.05 ? "At your target" : fmtW(Math.abs(left)) + (left > 0 ? " to go" : " under target")); }
+    ctl = (sub.length ? '<div class="me">' + esc(sub.join(" · ")) + "</div>" : "") + '<div class="r2 bin"><input class="in" id="bwIn" inputmode="decimal" placeholder="Today, in ' + (lb() ? "lb" : "kg") + '" aria-label="Weight today"><button class="btn sm" data-a="bodyQuick" data-m="weight">Save</button></div>';
+    return '<div class="card bd"><div class="bdh"><span class="bdi">' + ic + "</span><b>" + nm + '</b><button class="btn ghost sm" data-a="bodyHist" data-m="' + m + '">History ›</button></div><div class="bdv">' + top + "</div>" + ctl + "</div>";
+  }
+  const pct = v != null && g ? Math.min(100, Math.round((100 * v) / g)) : 0, avg = bodyAvg(m, 7), [hit, logged] = bodyHit(m, 7);
+  top = v != null ? "<b>" + bfmt(m, v) + '</b> <span class="muted">/ ' + bfmt(m, g) + (v >= g ? " ✓" : "") + "</span>" : '<span class="muted">Goal ' + bfmt(m, g) + " · not logged yet</span>";
+  const wr = m === "water" ? wrem() : null, sub0 = wr && wr.on ? "Reminders " + wr.from + "–" + wr.to + ", every " + wr.every / 60 + " h" + ". " : "";
+  const sub = sub0 + (logged ? "7 days: goal " + hit + " of " + logged + " logged" + (avg != null ? " · avg " + bfmt(m, avg) : "") : "");
+  if (m === "water") ctl = '<div class="r3"><button class="btn ghost sm" data-a="water" data-v="250">+250</button><button class="btn ghost sm" data-a="water" data-v="500">+500</button><button class="btn ghost sm" data-a="water" data-v="750">+750</button><button class="btn ghost sm" data-a="water" data-v="-250" aria-label="Undo 250 ml">−250</button></div>' +
+    '<div class="r2 bin"><input class="in" id="bwaIn" inputmode="numeric" placeholder="Other amount, ml" aria-label="Other amount in ml"><button class="btn sm" data-a="water" data-v="custom">Add</button></div>';
+  else if (m === "sleep") ctl = '<div class="r2 bin"><input class="in" id="bsIn" placeholder="Last night, e.g. 7:30 or 7.5" aria-label="Sleep last night"><button class="btn sm" data-a="bodyQuick" data-m="sleep">Save</button></div>';
+  else ctl = '<div class="r2 bin"><input class="in" id="bpIn" inputmode="numeric" placeholder="Total so far today" aria-label="Steps today"><button class="btn sm" data-a="bodyQuick" data-m="steps">Save</button></div>';
+  return '<div class="card bd"><div class="bdh"><span class="bdi">' + ic + "</span><b>" + nm + '</b><button class="btn ghost sm" data-a="bodyHist" data-m="' + m + '">History ›</button></div><div class="bdv">' + top + '</div><div class="bar"><i style="width:' + pct + '%"></i></div>' + (sub ? '<div class="me">' + esc(sub) + "</div>" : "") + ctl + "</div>";
+}
+function vBody() {
+  return '<p class="hint" style="margin:2px 4px 10px">Type what you have. Reaching a goal gives 5 XP. Steps are entered by hand, as a web app cannot read your phone’s step counter.</p>' + BKEYS.map(bodyCard).join("") +
+    '<button class="btn ghost pick" data-a="bodyGoals">Set goals and units</button>';
+}
+const bodyToday = () => {
+  const t = today(), p = [];
+  const w = bodyVal(t, "water"), sl = bodyVal(t, "sleep"), st = bodyVal(t, "steps"), wt = bodyVal(t, "weight");
+  p.push("💧 " + (w != null ? nf(w) : "–"), "😴 " + (sl != null ? fmtSleep(sl) : "–"), "👣 " + (st != null ? nf(st) : "–"));
+  if (wt != null) p.push("⚖️ " + fmtW(wt));
+  return '<div class="card bdt"><button class="bdtl" data-a="tab" data-v="body" aria-label="Open the Body tab">' + p.join('<span class="dot"> · </span>') + ' <span class="muted">›</span></button><button class="btn soft sm" data-a="water" data-v="250" aria-label="Add 250 ml of water">+💧</button></div>';
+};
+function bodyHistBody(m) {
+  const s = set(), g = s[BODY[m][2]], recs = Object.values(db.recs).filter((r) => r.type === "body" && !r.del && r[m] != null).sort((a, b) => (a.day < b.day ? 1 : -1)).slice(0, 40);
+  let h = (m === "weight" ? bodyLine(Math.min(90, Math.max(7, Math.round((keyTs(today(), O()) - keyTs(((recs[recs.length - 1] || {}).day) || today(), O())) / DAY) + 1))) : bodyBars(m, 14));
+  h += '<div class="r2 bin"><input class="in" type="date" id="bhDay" value="' + today() + '" max="' + today() + '" aria-label="Day"><input class="in" id="bhVal" placeholder="' + (m === "weight" ? lb() ? "lb" : "kg" : m === "sleep" ? "7:30" : m === "water" ? "ml" : "steps") + '" aria-label="Value"><button class="btn sm" data-a="bodyAdd" data-m="' + m + '">Save</button></div>';
+  h += '<p class="hint">Saving over a day replaces what was there.</p><div class="sec">Recent</div>';
+  h += recs.length ? '<div class="card list">' + recs.map((r) => '<div class="row"><div class="rt"><div class="ti">' + shortDay(r.day) + " · " + bfmt(m, r[m]) + (m !== "weight" && r[m] >= g ? " ✓" : "") + '</div></div><button class="btn ghost sm" data-a="bodyDel" data-m="' + m + '" data-d="' + r.day + '" aria-label="Delete ' + shortDay(r.day) + '">✕</button></div>').join("") + "</div>" : '<div class="card empty">Nothing logged yet.</div>';
+  return h;
+}
+function bodyGoalsBody() {
+  const s = set();
+  return '<span class="lab">Water goal, ml a day</span><input class="in" inputmode="numeric" data-c="bg" data-k="waterGoal" value="' + s.waterGoal + '">' +
+    '<span class="lab" style="margin-top:12px">Sleep goal</span><select class="in" data-c="bg" data-k="sleepGoal">' + opts([360, 390, 420, 450, 480, 510, 540, 600].map((m) => [m, fmtSleep(m)]), s.sleepGoal) + "</select>" +
+    '<span class="lab" style="margin-top:12px">Step goal a day</span><input class="in" inputmode="numeric" data-c="bg" data-k="stepGoal" value="' + s.stepGoal + '">' +
+    '<span class="lab" style="margin-top:12px">Weight unit</span><select class="in" data-c="bg" data-k="wUnit">' + opts([["kg", "Kilograms"], ["lb", "Pounds"]], s.wUnit) + "</select>" +
+    '<span class="lab" style="margin-top:12px">Target weight, optional (' + (lb() ? "lb" : "kg") + ')</span><input class="in" inputmode="decimal" data-c="bg" data-k="wGoal" placeholder="Leave empty for none" value="' + (s.wGoal ? Math.round((lb() ? s.wGoal * 2.20462 : s.wGoal) * 10) / 10 : "") + '">' +
+    '<div class="sec">Water reminders</div>' + waterRemHtml() + '<div class="msg" id="mBg"></div>';
+}
+const wrem = () => ({ ...DEF.waterRem, ...(set().waterRem || {}) });
+function waterRemHtml() {
+  const w = wrem(), chs = [["push", "Push"], ["tg", "Telegram"], ["email", "Email"]];
+  return '<select class="in" data-c="wr" data-k="on">' + opts([["0", "Off"], ["1", "On"]], w.on ? "1" : "0") + "</select>" +
+    (w.on ? '<div class="r2" style="margin-top:12px"><div><span class="lab">From</span><input class="in" type="time" data-c="wr" data-k="from" value="' + esc(w.from) + '"></div><div><span class="lab">Until</span><input class="in" type="time" data-c="wr" data-k="to" value="' + esc(w.to) + '"></div></div>' +
+    '<span class="lab" style="margin-top:12px">How often</span><select class="in" data-c="wr" data-k="every">' + opts([[60, "Every hour"], [90, "Every 1.5 hours"], [120, "Every 2 hours"], [180, "Every 3 hours"], [240, "Every 4 hours"]], w.every) + "</select>" +
+    '<span class="lab" style="margin-top:12px">Send by</span><div class="chips">' + chs.map(([k, l]) => '<button class="chip" data-a="wrCh" data-v="' + k + '" aria-pressed="' + w.ch.includes(k) + '">' + l + "</button>").join("") + "</div>" +
+    '<p class="hint" style="margin-top:8px">Stops for the day once you reach your water goal, and stays quiet during your quiet hours. Needs sync turned on.</p>' : "");
+}
 // ================= views =================
 const ui = { tab: "today", filter: "inbox", q: "", month: today().slice(0, 7), sel: today(), calMode: "month", showDone: false,
   hcal: "all", hmonth: today().slice(0, 7), hSort: lsGet("onward.hsort") === "tag" ? "tag" : "manual", hFilter: "", selecting: false, selected: {}, collapsed: {}, foRef: "" };
-const TABS = [["today", "Today"], ["tasks", "Tasks"], ["cal", "Calendar"], ["habits", "Habits"], ["focus", "Now"]];
+const TABS = [["today", "Today"], ["tasks", "Tasks"], ["cal", "Calendar"], ["habits", "Habits"], ["body", "Body"], ["focus", "Now"]];
 
 const listOf = (it) => (it.list && db.recs[it.list] && !db.recs[it.list].del ? db.recs[it.list] : null);
 function row(it, opt = {}) {
@@ -505,6 +641,7 @@ function vToday() {
     h += '<div class="sec">Done today <span class="n">' + done.length + " · +" + xp + ' XP</span><button data-a="toggleDone">' + (ui.showDone ? "Hide" : "Show") + "</button></div>";
     if (ui.showDone) h += '<div class="card list">' + done.map((l) => '<div class="row done"><span class="chk" aria-pressed="true"></span><div class="rt"><div class="ti">' + esc(l.title) + '</div><div class="me">' + fmtTime(l.at, o) + " · +" + (l.xp || 0) + " XP</div></div></div>").join("") + "</div>";
   }
+  h += bodyToday();
   const sunday = loc(Date.now(), o).getUTCDay() === 0, reviewed = !!db.recs["wr-" + weekStart(0)];
   h += '<button class="btn ' + (sunday && !reviewed ? "soft" : "ghost") + ' pick" data-a="review">📋 ' + (sunday && !reviewed ? "It’s Sunday. Do your weekly review" : "Weekly review") + "</button>";
   return h;
@@ -939,7 +1076,7 @@ function render() {
   for (const el of $$("input[id], textarea[id], select[id]", main)) if (el.type !== "search" && el.value !== "") drafts[el.id] = el.value;
   $("#nav").innerHTML = '<div class="brand">Onward</div>' + TABS.map(([k, l]) => '<button data-a="tab" data-v="' + k + '"' + (ui.tab === k ? ' aria-current="page"' : "") + ">" + ICON[k] + "<span>" + l + "</span></button>").join("");
   drawTop();
-  main.innerHTML = { today: vToday, tasks: vTasks, cal: vCal, habits: vHabits, focus: vFocus }[ui.tab]();
+  main.innerHTML = { today: vToday, tasks: vTasks, cal: vCal, habits: vHabits, body: vBody, focus: vFocus }[ui.tab]();
   main.scrollTop = y;
   for (const id in drafts) { const el = document.getElementById(id); if (el && main.contains(el)) el.value = drafts[id]; }
   if ($("#qa") && $("#qa").value) $("#qap").textContent = quickPreview($("#qa").value);
@@ -1999,6 +2136,10 @@ document.addEventListener("keydown", (e) => {
     const k = el.id === "foCustom" ? "timers" : "guesses";
     if (ui.pe === k) A.peAdd({ dataset: { k, i: el.id } }); else A[el.id === "foCustom" ? "foCustom" : "nwGuessC"]();
   }
+  else if (e.key === "Enter" && ({ bwaIn: ["water", "custom"], bsIn: ["bodyQuick", "sleep"], bpIn: ["bodyQuick", "steps"], bwIn: ["bodyQuick", "weight"], bhVal: ["bodyAdd", ""] })[el.id]) {
+    e.preventDefault(); const [f, v] = ({ bwaIn: ["water", "custom"], bsIn: ["bodyQuick", "sleep"], bpIn: ["bodyQuick", "steps"], bwIn: ["bodyQuick", "weight"], bhVal: ["bodyAdd", ""] })[el.id];
+    A[f]({ dataset: { v, m: f === "bodyAdd" ? ui.bm : v } });
+  }
   else if (e.key === "Enter" && el.id === "eName") { e.preventDefault(); A.tapSaveGo({ dataset: { v: "0" } }); }
   else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && el.classList && el.classList.contains("grip")) { e.preventDefault(); moveHabit(el.dataset.id, e.key === "ArrowUp" ? -1 : 1); }
   else if ((e.key === "Enter" || e.key === " ") && el.getAttribute && el.getAttribute("role") === "button") { e.preventDefault(); el.click(); }
@@ -2145,6 +2286,51 @@ if ("serviceWorker" in navigator) {
     if (d.open) sync().then(() => openFromLink(d.open, d.alarm));
   });
 }
+Object.assign(A, {
+  water(el) {
+    const t = today(), cur = bodyVal(t, "water") || 0;
+    let n = el.dataset.v === "custom" ? parseNum(($("#bwaIn") || {}).value || "", "water") : +el.dataset.v;
+    if (!n) return toast("Type an amount in ml.", null);
+    const next = Math.max(0, cur + n), c = $("#bwaIn"); if (c) c.value = "";
+    bodySet(t, "water", next || null);
+    done();
+  },
+  bodyQuick(el) {
+    const m = el.dataset.m, inp = $({ water: "#bwaIn", sleep: "#bsIn", steps: "#bpIn", weight: "#bwIn" }[m]), v = bodyParse(m, inp ? inp.value : "");
+    if (v == null) return toast(m === "sleep" ? "Try 7:30 or 7.5." : "That doesn’t look like a number I can use.", null);
+    inp.value = ""; bodySet(today(), m, v); done();
+  },
+  bodyHist(el) { ui.bm = el.dataset.m; openSheet(BODY[ui.bm][1] + " history", bodyHistBody(ui.bm), null, "Close"); },
+  bodyAdd(el) {
+    const m = el.dataset.m, d = $("#bhDay").value, v = bodyParse(m, $("#bhVal").value);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || d > today()) return toast("Pick a day up to today.", null);
+    if (v == null) return toast("That doesn’t look like a number I can use.", null);
+    bodySet(d, m, v); setBody(bodyHistBody(m)); render(); $("#bhVal").value = "";
+  },
+  bodyDel(el) { bodySet(el.dataset.d, el.dataset.m, null); setBody(bodyHistBody(el.dataset.m)); render(); },
+  wrCh(el) {
+    const w = wrem(), c = el.dataset.v, ch = w.ch.includes(c) ? w.ch.filter((x) => x !== c) : w.ch.concat(c);
+    if (!ch.length) return toast("Pick at least one way to be reminded.", null);
+    put({ ...set(), waterRem: { ...w, ch } }); setBody(bodyGoalsBody());
+  },
+  bodyGoals() { openSheet("Body goals", bodyGoalsBody(), null, "Done"); },
+});
+C.wr = (el) => {
+  const k = el.dataset.k, w = wrem(); let v = el.value;
+  if (k === "on") v = v === "1"; else if (k === "every") v = +v;
+  const n = { ...w, [k]: v };
+  if (n.on && !(n.from < n.to)) { toast("“Until” has to be later than “From”.", null); return setBody(bodyGoalsBody()); }
+  put({ ...set(), waterRem: n }); setBody(bodyGoalsBody()); render();
+};
+C.bg = (el) => {
+  const k = el.dataset.k, s = set(); let v;
+  if (k === "wUnit") v = el.value === "lb" ? "lb" : "kg";
+  else if (k === "sleepGoal") v = +el.value;
+  else if (k === "wGoal") { const x = parseNum(el.value, "w"); v = el.value.trim() === "" ? 0 : x != null && toKg(x) >= 20 && toKg(x) <= 400 ? Math.round(toKg(x) * 100) / 100 : s.wGoal; }
+  else { const x = parseNum(el.value, "n"); v = x && x >= 100 && x <= 200000 ? Math.round(x) : s[k]; }
+  put({ ...s, [k]: v }); setBody(bodyGoalsBody()); render();
+};
+
 sync().then(loadCfg).then(() => {
   const p = new URLSearchParams(location.search);
   if (p.get("open")) openFromLink(p.get("open"), p.get("alarm"));

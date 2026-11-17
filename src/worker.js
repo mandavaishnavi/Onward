@@ -9,7 +9,7 @@
 // Telegram and email details are entered inside the app (Settings) and stored
 // in the database, so there is nothing else to configure here.
 
-import { fires, complete, taskLog, habitNeed, quietUntil, fmtTime, tz, dayKey, keyTs, MIN, DAY, uid, fmtWhen } from "../public/shared.js";
+import { fires, complete, taskLog, habitNeed, quietUntil, waterDue, fmtTime, tz, dayKey, keyTs, MIN, DAY, uid, fmtWhen } from "../public/shared.js";
 
 const enc = new TextEncoder();
 const J = (b, s = 200) => new Response(JSON.stringify(b), {
@@ -317,6 +317,15 @@ async function tick(env) {
       await logSend(env, now, msg.title, res);
     }
     if (rec && !rec.del && (rec.type === "habit" || (rec.rep && rec.kind === "event"))) await env.DB.batch(sched(env, rec, set, now));
+  }
+  // Water nudges: spread through the day, stopped once today's goal is reached.
+  if (set.waterRem && set.waterRem.on) {
+    const b = await getRec(env, "b-" + dayKey(now, o)), due = waterDue(set, now, b && !b.del && b.water ? b.water : 0);
+    if (due && (await kget(env, "waterSlot")) !== due.key) {
+      await kset(env, "waterSlot", due.key);
+      const ch = due.ch.filter((c) => c === "push" || c === "tg" || c === "email");
+      if (ch.length) await logSend(env, now, "💧 Water", await notify(env, ch, { title: "💧 Time for water", body: due.body, tag: "water" }, ""));
+    }
   }
   // Morning plan: one summary a day at the time chosen in Settings.
   if (set.digestAt && (set.digestCh || []).length) {

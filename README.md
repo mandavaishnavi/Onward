@@ -6,6 +6,10 @@ A personal tasks + calendar + habits app for phone and laptop, hosted on Cloudfl
 - **Tasks and events**: lists, tags, priorities, subtasks, repeats, quick add that
   understands "call mom tomorrow 5pm #home !high every week".
 - **Calendar**: month and week views; repeating items show on every date.
+- **Body**: water, sleep, steps and weight, one reading per day with goals, a 7-day
+  summary, 14-day charts, a weight trend and back-dated entries. Steps are typed in, because
+  a web app cannot read the phone's step counter. Hitting a goal gives 5 XP. Optional water reminders are spread between two times of
+  day, sent by push, Telegram or email, and stop once the goal is reached.
 - **Habits**: the tally counter, built in. Daily check-offs, times-per-day, icons with
   suggestions, tags (filter, group, and per-tag calendar), drag to reorder, multi-select
   delete, a calendar that deepens with how much of a day is done, day detail, streaks,

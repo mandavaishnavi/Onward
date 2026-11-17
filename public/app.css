@@ -387,3 +387,32 @@ button.stat span{color:var(--accent);font-weight:600}
 .fprow{display:flex;align-items:center;gap:12px;width:100%;min-height:58px;padding:9px 12px;border:1px solid var(--line);border-radius:14px;background:var(--card);text-align:left}
 .fprow[aria-pressed="true"]{border-color:var(--accent);background:var(--soft)}
 .fprow .tick{width:22px;text-align:center;font-weight:800;color:var(--accent);flex:none}
+
+/* body tab */
+.bd{padding:14px;margin-bottom:12px}
+.bdh{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.bdh b{flex:1;font-size:16px}
+.bdi{font-size:20px}
+.bdv{font-size:15px;margin:2px 0 8px}
+.bdv b{font-size:26px;font-variant-numeric:tabular-nums}
+.bd .me{font-size:12.5px;color:var(--muted);margin:6px 0 2px}
+.bd .bar{height:8px}
+.r3{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+.bin{margin-top:10px;gap:8px}
+.bin .btn{flex:none}
+.muted{color:var(--muted)}
+.bchart{width:100%;height:auto;display:block;margin:6px 0 2px}
+.bchart .bhit{fill:var(--accent)}
+.bchart .bmiss{fill:var(--accent);opacity:.4}
+.bchart .bnone{fill:var(--line)}
+.bchart .bgoal{stroke:var(--muted);stroke-width:1;stroke-dasharray:4 3}
+.bchart .bline{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.bchart .bdot{fill:var(--accent);stroke:var(--card);stroke-width:2}
+.bchart .blab{font-size:9px;fill:var(--muted)}
+.bkey{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--muted);margin-bottom:12px}
+.bkey i{width:10px;height:10px;border-radius:3px;background:var(--accent);display:inline-block}
+.bkey i.bmiss{opacity:.4}
+.bkey .bgl{width:14px;border-top:1px dashed var(--muted);display:inline-block}
+.bdt{display:flex;align-items:center;gap:8px;padding:8px 8px 8px 14px;margin-top:16px}
+.bdtl{flex:1;text-align:left;font:inherit;color:inherit;font-size:14px;font-weight:600;padding:8px 0;font-variant-numeric:tabular-nums}
+.bdt .btn{flex:none}

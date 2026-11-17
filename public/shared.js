@@ -125,6 +125,23 @@ export function quietUntil(set, now) {
   return end > now ? end : keyTs(addDays(k, 1), o, th, tm);
 }
 
+// ---------- water reminders ----------
+// Reminders are spread evenly from "from" to "to". Returns the slot that is due right now
+// (so the server can send each slot once), or null. A slot older than 15 minutes is dropped
+// rather than sent late, and nothing is sent in quiet hours.
+export function waterDue(set, now, have) {
+  const w = set && set.waterRem;
+  if (!w || !w.on || !(w.ch || []).length) return null;
+  const o = tz(set), k = dayKey(now, o), [fh, fm] = hm(w.from || "09:00"), [th, tm] = hm(w.to || "21:00");
+  const every = Math.min(480, Math.max(30, Number(w.every) || 120)) * MIN, a = keyTs(k, o, fh, fm), b = keyTs(k, o, th, tm);
+  if (!(a < b) || now < a || now > b) return null;
+  const n = Math.floor((now - a) / every), at = a + n * every;
+  if (now - at > 15 * MIN || quietUntil(set, now)) return null;
+  const goal = Number(set.waterGoal) || 2500;
+  if (have >= goal) return null;
+  return { key: k + ":" + n, ch: w.ch, body: (have > 0 ? Math.round(have).toLocaleString("en-IN") + " of " + goal.toLocaleString("en-IN") + " ml so far. " : "Nothing logged yet today. ") + "Have a glass, then tap to log it." };
+}
+
 // ---------- reminders ----------
 // The moment reminders count back from. All-day items use the "all-day reminder time".
 export function baseTime(at, allDay, set) {
