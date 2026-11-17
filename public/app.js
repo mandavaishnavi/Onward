@@ -744,8 +744,6 @@ const STUCK = {
 };
 function foStart(min, starter) {
   const it = nowTask();
-  const pick = $("#foRef");
-  if (pick) ui.foRef = pick.value;
   const ref = it ? it.id : (fo && fo.ended && fo.ref) || ui.foRef || "";
   fo = min === "sw" ? { ref, sw: 1, start: Date.now(), acc: 0, min: 0, lastChk: 0 } : { ref, min, end: Date.now() + min * MIN, starter: !!starter, lastChk: 0 };
   np.panel = ""; np.stuck = ""; saveFo(); wakeOn(); beep([523]);
@@ -808,6 +806,23 @@ function presetRow(k, label, pick, inputId, goAction, goLabel) {
     (edit ? '<button class="chip" data-a="peAdd" data-k="' + k + '" data-i="' + inputId + '">Add</button><button class="link" data-a="peEdit" data-k="' + k + '">Done</button>'
       : '<button class="chip" data-a="' + goAction + '">' + goLabel + '</button><button class="link" data-a="peEdit" data-k="' + k + '">Edit</button>') + "</div>";
 }
+// ---------- picker for what the standalone timer is timing ----------
+const fpIcon = (r) => r.type === "habit"
+  ? '<span class="fpi" style="background:' + calColor(r.color) + ";color:" + inkOn(calColor(r.color)) + '">' + esc(r.icon || "↻") + "</span>"
+  : '<span class="fpi task">' + esc(r.icon || "✓") + "</span>";
+function fpList(q) {
+  const o = O(), now = Date.now(), start = startToday(), f = (name) => !q || name.toLowerCase().includes(q);
+  const rowHtml = (id, icon, name, meta) => '<button class="fprow" data-a="foPickSet" data-id="' + id + '" aria-pressed="' + (ui.foRef === id) + '">' + icon + '<span class="pt"><b>' + esc(name) + "</b>" + (meta ? "<small>" + meta + "</small>" : "") + '</span><span class="tick">' + (ui.foRef === id ? "✓" : "") + "</span></button>";
+  const tk = items().filter((i) => i.kind === "task" && !i.done && f(i.title));
+  const soon = tk.filter((i) => i.at != null && i.at < start + DAY).sort(byAt), later = tk.filter((i) => !(i.at != null && i.at < start + DAY)).sort(byAt).slice(0, 60);
+  const meta = (i) => [i.at != null ? fmtWhen(i, o, now) : onShelf(i) ? "Meaning to" : "", listOf(i) ? listOf(i).name : "", i.est ? "~" + dur(i.est) : ""].filter(Boolean).map(esc).join(" · ");
+  const hb = habits().filter((x) => f(x.name));
+  let h = q ? "" : rowHtml("", '<span class="fpi none">⏱</span>', "Nothing specific", "Just time, not tied to anything");
+  if (soon.length) h += '<div class="fpsec">Today and carried over</div>' + soon.map((i) => rowHtml(i.id, fpIcon(i), i.title, meta(i))).join("");
+  if (hb.length) h += '<div class="fpsec">Habits</div>' + hb.map((x) => rowHtml(x.id, fpIcon(x), x.name, [x.tag ? "#" + esc(x.tag) : "", (x.freq || 1) > 1 ? x.freq + " times a day" : ""].filter(Boolean).join(" · "))).join("");
+  if (later.length) h += '<div class="fpsec">Other tasks</div>' + later.map((i) => rowHtml(i.id, fpIcon(i), i.title, meta(i))).join("");
+  return h || '<div class="empty">Nothing matches “' + esc(q) + "”.</div>";
+}
 function timerBox(hasStep) {
   const step = hasStep ? '<button class="btn" data-a="nwStepDone">Step done</button>' : "";
   if (running()) return dial() + '<div class="acts">' + step + '<button class="btn ghost" data-a="foPause">' + (ticking() ? "Pause" : "Resume") + '</button><button class="btn ghost" data-a="foStop">' + (fo.sw ? "Finish" : "Finish early") + '</button><button class="btn ghost" data-a="foReset">Reset</button></div>';
@@ -850,9 +865,11 @@ function vFocus() {
         '<div class="sec">' + from + '</div><div class="card list">' + list.slice(0, 6).map((x) => '<div class="row" data-a="nwSet" data-id="' + x.id + '" role="button" tabindex="0"><div class="rt"><div class="ti">' + esc(x.title) + "</div>" +
         (x.left || x.est || x.at != null ? '<div class="me">' + [x.at != null ? fmtWhen(x, o, Date.now()) : "", x.est ? "~" + dur(x.est) : "", x.left ? "left off: " + x.left : ""].filter(Boolean).map(esc).join(" · ") + "</div>" : "") + "</div></div>").join("") + "</div>";
     }
-    const tk = items().filter((i) => i.kind === "task" && !i.done).sort(byAt).slice(0, 40), hb = habits();
-    h += '<div class="sec">' + (tail ? "Run a timer" : "Or just run a timer") + '</div><div class="card nowc">' + (running() || (fo && fo.ended) ? "" : '<select class="in" id="foRef" aria-label="What the timer is for" style="margin-bottom:8px"><option value="">Nothing specific</option>' +
-      (tk.length ? '<optgroup label="Tasks">' + opts(tk.map((i) => [i.id, i.title]), ui.foRef) + "</optgroup>" : "") + (hb.length ? '<optgroup label="Habits">' + opts(hb.map((x) => [x.id, (x.icon ? x.icon + " " : "") + x.name]), ui.foRef) + "</optgroup>" : "") + "</select>") + timerBox(false) + "</div>";
+    const cand = db.recs[ui.foRef], tgt = cand && !cand.del && (cand.type === "habit" || !cand.done) ? cand : null; // a habit's "done" is its history, not a finished flag
+    if (!tgt) ui.foRef = "";
+    // What the timer is for: a button that opens a searchable picker, not the phone's plain dropdown.
+    h += '<div class="sec">' + (tail ? "Run a timer" : "Or just run a timer") + '</div><div class="card nowc">' + (running() || (fo && fo.ended) ? "" : '<button class="pickbtn" data-a="foPick" aria-label="Choose what the timer is for">' +
+      (tgt ? fpIcon(tgt) : '<span class="fpi none">⏱</span>') + '<span class="pt"><small>Timing</small><b>' + esc(tgt ? tgt.title || tgt.name : "Nothing specific") + '</b></span><span class="chev">›</span></button>') + timerBox(false) + "</div>";
   } else {
     const subs = it.subs || [], n = subs.length, dn = subs.filter((x) => x.d).length, st = subs.find((x) => !x.d) || (!n && it.step ? { t: it.step } : null);
     const park = '<button class="link" data-a="nwPark">Not now</button>';
@@ -1656,6 +1673,11 @@ const A = {
     render();
   },
   foStart(el) { foStart(el.dataset.v === "sw" ? "sw" : +el.dataset.v, !!el.dataset.s); render(); },
+  foPick() {
+    const many = items().filter((i) => i.kind === "task" && !i.done).length + habits().length > 6;
+    openSheet("What is this timer for?", (many ? '<input class="in" id="fpQ" type="search" autocomplete="off" placeholder="Search tasks and habits" aria-label="Search tasks and habits" style="margin-bottom:10px">' : "") + '<div class="fplist" id="fpList">' + fpList("") + "</div>", null, "Close");
+  },
+  foPickSet(el) { ui.foRef = el.dataset.id; closeSheet(true); },
   foCustom() {
     const n = Math.floor(+$("#foCustom").value);
     if (!(n >= 1 && n <= 600)) return toast("Type a length between 1 and 600 minutes.");
@@ -1950,7 +1972,6 @@ document.addEventListener("change", (e) => {
     put({ ...set(), [k]: v }); if (k === "theme") applyTheme();
   }
   if (el.id === "tapLabel") { const s = set(); put({ ...s, tap: { ...s.tap, label: el.value } }); }
-  if (el.id === "foRef") ui.foRef = el.value;
   if (el.id === "sFile" && el.files[0]) el.files[0].text().then((t) => {
     const d = JSON.parse(t);
     if (!d || d.app !== "onward" || !Array.isArray(d.recs)) throw new Error("not a Onward backup");
@@ -1962,6 +1983,7 @@ document.addEventListener("toggle", (e) => { if (e.target.id === "allSteps") ui.
 document.addEventListener("input", (e) => {
   if (e.target.id === "qa") $("#qap").textContent = quickPreview(e.target.value);
   if (e.target.id === "q") { ui.q = e.target.value; render(); }
+  if (e.target.id === "fpQ") $("#fpList").innerHTML = fpList(e.target.value.trim().toLowerCase());
   if (e.target.id === "hdName" && hd) { hd.name = e.target.value; $("#hdSug").innerHTML = sugHtml(); }
   if (ed && e.target.dataset.f === "title" && $("#edSug")) { ed.it.title = e.target.value; $("#edSug").innerHTML = edSugHtml(); }
 });

@@ -372,3 +372,18 @@ button.stat span{color:var(--accent);font-weight:600}
 
 .chip.del{border-style:dashed;color:var(--danger)}
 .guess .commit{margin:0;flex:1}
+
+/* picker for what the timer is timing */
+.pickbtn{display:flex;align-items:center;gap:12px;width:100%;padding:10px 12px;margin-bottom:10px;border:1px solid var(--line);border-radius:14px;background:var(--paper);text-align:left}
+.pickbtn:active,.fprow:active{background:var(--soft)}
+.pt{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.pt b{font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pt small{font-size:12.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chev{font-size:22px;color:var(--muted);line-height:1}
+.fpi{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;font-size:19px;flex:none;background:var(--soft);color:var(--accent);font-weight:700}
+.fpi.none{background:var(--card);border:1px dashed var(--line);color:var(--muted);font-size:17px}
+.fplist{display:flex;flex-direction:column;gap:6px}
+.fpsec{font-size:12.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:12px 2px 2px}
+.fprow{display:flex;align-items:center;gap:12px;width:100%;min-height:58px;padding:9px 12px;border:1px solid var(--line);border-radius:14px;background:var(--card);text-align:left}
+.fprow[aria-pressed="true"]{border-color:var(--accent);background:var(--soft)}
+.fprow .tick{width:22px;text-align:center;font-weight:800;color:var(--accent);flex:none}

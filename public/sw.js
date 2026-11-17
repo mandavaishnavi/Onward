@@ -1,6 +1,6 @@
 // Service worker: keeps the app opening offline and shows reminders that
 // arrive as push messages, including the Done / Snooze buttons on them.
-const CACHE = "onward-v11";
+const CACHE = "onward-v12";
 const SHELL = ["/", "/app.css", "/app.js", "/shared.js", "/manifest.json", "/icon-192.png"];
 
 self.addEventListener("install", (e) => {
