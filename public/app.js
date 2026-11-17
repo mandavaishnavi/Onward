@@ -2,7 +2,7 @@
 // Data lives in localStorage as small records and syncs to the Worker when a
 // sync key is set, so the app keeps working offline.
 import { MIN, DAY, WD, MO, uid, tz, loc, dayKey, keyTs, addDays, fmtTime, fmtDay, fmtWhen,
-  occurrences, repText, remText, fires, habitTimes, habitNeed, complete, taskLog, level } from "./shared.js";
+  occurrences, occFrom, repText, remText, fires, habitTimes, habitNeed, complete, taskLog, level } from "./shared.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -61,7 +61,7 @@ const lumOf = (hex) => { const c = rgbOf(hex).map((v) => { v /= 255; return v <=
 // Dark text on pale colours, white text on deep ones.
 const inkOn = (hex) => (lumOf(hex) > 0.3 ? "#18212B" : "#FFFFFF");
 // White and near-black habits would vanish against the card, so they are drawn with visible neighbours.
-const calColor = (hex) => { const L = lumOf(hex); return L > 0.85 ? "#C5CDD5" : L < 0.03 ? "#56626F" : hex; };
+const calColor = (hex) => { if (!/^#[0-9a-f]{3,8}$/i.test(String(hex))) return "#71C0B6"; const L = lumOf(hex); return L > 0.85 ? "#C5CDD5" : L < 0.03 ? "#56626F" : hex; };
 const blend = (top, under, a) => { const A = rgbOf(top), B = rgbOf(under); return "#" + [0, 1, 2].map((i) => pad(Math.round(B[i] + (A[i] - B[i]) * a).toString(16))).join(""); };
 const cssHex = (name, dflt) => { const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim(); return /^#[0-9a-f]{6}$/i.test(v) ? v : dflt; };
 // A day's colour deepens with how much of it is done, from a faint wash to the full colour.
@@ -147,6 +147,13 @@ async function sync() {
 }
 function setDot(d) { dot = d; const el = $("#top .dot"); if (el) el.className = "dot " + d; }
 
+// AI suggestions run on the server (Cloudflare Workers AI) and only when a suggest button is tapped.
+async function aiAsk(body) {
+  if (!key) throw new Error("AI suggestions need sync turned on (Settings).");
+  if (!navigator.onLine) throw new Error("You are offline, so AI suggestions are unavailable.");
+  return api("/api/ai", body);
+}
+
 // ================= derived: XP, streaks, quests =================
 function game() {
   if (memo) return memo;
@@ -230,8 +237,10 @@ const shelfAnswered = () => lsSet("onward.shelfDay", today());
 function quest() {
   const id = "q-" + today(), start = startToday();
   let q = db.recs[id] && !db.recs[id].del ? db.recs[id] : { id, type: "quest", picks: [] };
-  if (q.picks.length >= 3) return q;
-  const used = new Set(q.picks.map((p) => p.ref)), picks = q.picks.slice();
+  // A deleted task stays as a finished quest if it was ticked off today; otherwise it leaves and another takes its place.
+  const kept = q.picks.filter((p) => { const r = db.recs[p.ref]; return r && (!r.del || (p.t === "item" && taskDoneToday(r))); });
+  if (kept.length === q.picks.length && kept.length >= 3) return q;
+  const used = new Set(q.picks.map((p) => p.ref)), picks = kept.slice();
   const open = items().filter((i) => i.kind === "task" && !i.done && !i.shelf);
   const due = open.filter((i) => i.at != null && i.at < start + DAY).sort((a, b) => (b.pri || 0) - (a.pri || 0) || a.at - b.at);
   const easy = open.filter((i) => (i.energy === "low" || (i.est && i.est <= 15)) && (i.at == null || i.at < start + DAY));
@@ -240,15 +249,16 @@ function quest() {
   const take = (arr, t) => { const x = arr.find((i) => !used.has(i.id)); if (x && picks.length < 3) { used.add(x.id); picks.push({ ref: x.id, t }); } };
   if (!picks.some((p) => p.t === "habit")) take(hs, "habit");
   take(due, "item"); take(easy, "item"); take(due, "item"); take(old, "item"); take(old, "item");
-  if (picks.length > q.picks.length) q = put({ ...q, picks });
+  if (picks.length !== q.picks.length || kept.length !== q.picks.length) q = put({ ...q, picks });
   return q;
 }
+const taskDoneToday = (r) => { const o = O(), t = today(); return !!r.done || logs().some((l) => l.ref === r.id && l.k === "task" && dayKey(l.at, o) === t); };
 function questState(p) {
   const r = db.recs[p.ref];
-  if (!r || r.del) return { title: "(removed)", ok: true };
-  if (p.t === "habit") return { title: (r.icon ? r.icon + " " : "") + r.name, ok: habitDone(r, today()) };
-  const o = O(), t = today();
-  return { title: r.title, ok: !!r.done || logs().some((l) => l.ref === r.id && l.k === "task" && dayKey(l.at, o) === t) };
+  if (!r) return { title: "", ok: true, gone: true };
+  const title = (r.icon ? r.icon + " " : "") + (r.title || r.name || "");
+  if (r.del) return { title, ok: true, gone: true }; // finished today, then deleted: it still counts
+  return { title, ok: p.t === "habit" ? habitDone(r, today()) : taskDoneToday(r) };
 }
 function checkQuests() {
   const q = db.recs["q-" + today()];
@@ -292,6 +302,16 @@ function toggleTask(id, el) {
   }
   if (nw.id === id) { nw = { id: "", why: "" }; saveNw(); }
   toast((l.shelf ? "Finally done. +" : l.late ? "Done. Late still counts. +" : "Done. +") + l.xp + " XP" + (l.shelf ? " (" + l.shelf + " for the wait)." : ".") + extra, () => { put(prev); del(l.id); if (hid) del(hid); });
+}
+// Undo today's completion. A repeating task goes back to the date it had before it was ticked.
+function untickTask(id) {
+  const it = db.recs[id], o = O(), t = today();
+  if (!it) return;
+  if (it.done) return toggleTask(id);
+  const l = logs().filter((x) => x.ref === id && x.k === "task" && dayKey(x.at, o) === t).sort((a, b) => b.at - a.at)[0];
+  if (!l) return;
+  put({ ...it, at: l.prev != null ? l.prev : it.at, cnt: Math.max(0, (it.cnt || 1) - 1) });
+  del(l.id);
 }
 function tickHabit(id, d, el) {
   const h = db.recs[id], k = today(), done = { ...(h.done || {}) }, freq = h.freq || 1, o = O();
@@ -390,7 +410,7 @@ function row(it, opt = {}) {
     ? '<span class="evbar" style="background:' + esc(L ? L.color : "") + '"></span>'
     : '<button class="chk p' + (it.pri || 0) + '" data-a="toggle" data-id="' + it.id + '" aria-pressed="' + !!it.done + '" aria-label="' + (it.done ? "Mark not done: " : "Mark done: ") + esc(it.title) + '"></button>';
   return '<div class="row' + (it.done ? " done" : "") + (opt.ghost ? " ghost" : "") + '" data-a="edit" data-id="' + it.id + '" role="button" tabindex="0">' + lead +
-    '<div class="rt"><div class="ti">' + esc(it.title) + "</div>" + (it.step && !it.done ? '<div class="st">→ ' + esc(it.step) + "</div>" : "") +
+    '<div class="rt"><div class="ti">' + esc((it.icon ? it.icon + " " : "") + it.title) + "</div>" + (it.step && !it.done ? '<div class="st">→ ' + esc(it.step) + "</div>" : "") +
     (meta.length ? '<div class="me">' + meta.join(" · ") + "</div>" : "") + "</div></div>";
 }
 const quickAdd = (ph) => '<div class="card qa"><input id="qa" type="text" list="names" enterkeyhint="done" autocomplete="off" placeholder="' + esc(ph) +
@@ -434,7 +454,8 @@ function vToday() {
   if (q.picks.length) {
     const st = q.picks.map(questState), n = st.filter((s) => s.ok).length;
     h += '<div class="card quests"><h3>🎯 Today’s quests <span>' + n + "/" + q.picks.length + " · +15 XP each</span></h3>" +
-      q.picks.map((p, i) => '<div class="quest' + (st[i].ok ? " ok" : "") + '" data-a="questOpen" data-i="' + i + '" role="button" tabindex="0"><span class="qd">' + (st[i].ok ? "✓" : "") + "</span>" + esc(st[i].title) + "</div>").join("") + "</div>";
+      q.picks.map((p, i) => '<div class="quest' + (st[i].ok ? " ok" : "") + '"><button class="qd" data-a="questTick" data-i="' + i + '" aria-pressed="' + st[i].ok + '"' + (st[i].gone ? " disabled" : "") + ' aria-label="' + (st[i].gone ? "Done and since deleted: " : st[i].ok ? "Mark not done: " : "Mark done: ") + esc(st[i].title) + '">' + (st[i].ok ? "✓" : "") +
+      '</button><span class="qt" data-a="questOpen" data-i="' + i + '" role="button" tabindex="0">' + esc(st[i].title) + "</span></div>").join("") + "</div>";
   }
   h += '<button class="btn soft pick" data-a="pick">🎲 Can’t decide? Pick one for me</button>';
   const so = shelfOffer();
@@ -466,15 +487,17 @@ function vTasks() {
   if (f === "shelf") h += '<p class="hint" style="margin:2px 4px 0">No dates and no reminders here. Today offers you one of these a day, and saying no is fine.</p>';
   h += '<input class="in" id="q" type="search" placeholder="Search" aria-label="Search tasks" value="' + esc(ui.q) + '" style="margin-top:6px">';
   if (lid && db.recs[lid]) h += '<div class="sec">' + esc(db.recs[lid].name) + '<button data-a="listEdit" data-id="' + lid + '">Edit list</button></div>';
-  let arr = its.filter((i) => (f === "done" ? i.done : !i.done)).filter((i) =>
-    f === "shelf" ? onShelf(i) : f === "inbox" ? !listOf(i) && !i.shelf : f === "week" ? i.at != null && i.at < start + 7 * DAY : f === "quick" ? i.kind === "task" && (i.energy === "low" || (i.est && i.est <= 15)) :
+  const nowTs = Date.now(), gone = (i) => i.kind === "event" && !i.rep && i.at != null && (i.allDay ? i.at + DAY : i.at + (i.dur || 60) * MIN) < nowTs;
+  const eff = (i) => (i.kind === "event" && i.rep ? occFrom(i, o, start) : i.at);
+  let arr = its.filter((i) => (f === "done" ? i.done || gone(i) : !i.done && !gone(i))).filter((i) =>
+    f === "shelf" ? onShelf(i) : f === "inbox" ? !listOf(i) && !i.shelf : f === "week" ? eff(i) != null && eff(i) < start + 7 * DAY : f === "quick" ? i.kind === "task" && (i.energy === "low" || (i.est && i.est <= 15)) :
     lid ? i.list === lid : tag ? (i.tags || []).includes(tag) : true);
   if (q) arr = arr.filter((i) => (i.title + " " + (i.notes || "") + " " + (i.tags || []).join(" ")).toLowerCase().includes(q));
   if (!arr.length) return h + '<div class="card empty" style="margin-top:14px">' + (q ? "Nothing matches that search." : f === "done" ? "Finished tasks will collect here." : f === "quick" ? "Tasks marked low energy or 15 minutes or less show up here." : f === "shelf" ? "Things you keep meaning to do, with no date in mind, live here. Add one above, or type “someday” in any quick add." : "Nothing here. Enjoy the quiet.") + "</div>";
-  if (f === "done") return h + '<div class="card list" style="margin-top:14px">' + arr.sort((a, b) => b.done - a.done).slice(0, 200).map((i) => row(i)).join("") + "</div>";
+  if (f === "done") return h + '<div class="card list" style="margin-top:14px">' + arr.sort((a, b) => (b.done || b.at) - (a.done || a.at)).slice(0, 200).map((i) => row(i)).join("") + "</div>";
   const names = ["Carried over", "Today", "Tomorrow", "Next 7 days", "Later", "No date", "Meaning to"], groups = names.map(() => []);
-  for (const i of arr) groups[i.at == null ? (i.shelf ? 6 : 5) : i.at < start ? (i.kind === "event" && i.rep ? 4 : 0) : i.at < start + DAY ? 1 : i.at < start + 2 * DAY ? 2 : i.at < start + 7 * DAY ? 3 : 4].push(i);
-  groups.forEach((g, n) => { if (g.length) h += '<div class="sec">' + names[n] + ' <span class="n">' + g.length + '</span></div><div class="card list">' + g.sort(byAt).map((i) => row(i, { noList: !!lid })).join("") + "</div>"; });
+  for (const i of arr) { const at = eff(i); groups[at == null ? (i.shelf ? 6 : 5) : at < start ? 0 : at < start + DAY ? 1 : at < start + 2 * DAY ? 2 : at < start + 7 * DAY ? 3 : 4].push(i); }
+  groups.forEach((g, n) => { if (g.length) h += '<div class="sec">' + names[n] + ' <span class="n">' + g.length + '</span></div><div class="card list">' + g.sort((a, b) => (eff(a) == null) - (eff(b) == null) || eff(a) - eff(b) || (b.pri || 0) - (a.pri || 0)).map((i) => row(i, { noList: !!lid, occ: eff(i) })).join("") + "</div>"; });
   return h;
 }
 
@@ -509,7 +532,7 @@ function vCal() {
   h += '<div class="grid">' + WD.map((d) => '<div class="dow">' + d + "</div>").join("");
   for (let i = 0; i < 42; i++) {
     const k = addDays(startK, i), arr = (map[k] || []).filter((x) => !x.it.done), cls = ["day"];
-    if (i >= 35 && k.slice(0, 7) !== ui.month && addDays(startK, 35).slice(0, 7) !== ui.month) break;
+    if (i >= 28 && i % 7 === 0 && k.slice(0, 7) !== ui.month) break;
     if (k.slice(0, 7) !== ui.month) cls.push("out");
     if (k === t) cls.push("today");
     if (hs.length && k <= t && dayInfo(hs, k).full) cls.push("hab");
@@ -609,9 +632,13 @@ try { fo = JSON.parse(lsGet("onward.focus")); } catch (e) {}
 try { nw = JSON.parse(lsGet("onward.now")) || nw; } catch (e) {}
 const saveFo = () => lsSet("onward.focus", JSON.stringify(fo));
 const saveNw = () => lsSet("onward.now", JSON.stringify(nw));
-const mmss = (ms) => { const s = Math.max(0, Math.ceil(ms / 1000)); return pad(Math.floor(s / 60)) + ":" + pad(s % 60); };
+const mmss = (ms) => { const s = Math.max(0, Math.ceil(ms / 1000)), h = Math.floor(s / 3600); return (h ? h + ":" : "") + pad(Math.floor((s % 3600) / 60)) + ":" + pad(s % 60); };
+// A stopwatch counts up: fo.sw is set, fo.start is when it last started (0 while paused), fo.acc is time banked before that.
+const swElapsed = () => (fo.acc || 0) + (fo.start ? Date.now() - fo.start : 0);
+const ticking = () => !!(fo && (fo.end || (fo.sw && fo.start)));
+const foShown = () => (fo.sw ? mmss(Math.floor(swElapsed() / 1000) * 1000) : mmss(fo.end ? fo.end - Date.now() : fo.left) + " left");
 const dur = (m) => { m = Math.round(m); if (m < 60) return m + " min"; const h = Math.floor(m / 60), r = m % 60; return r ? h + " h " + r + " m" : h + " h"; };
-const running = () => !!(fo && (fo.end || fo.left));
+const running = () => !!(fo && (fo.end || fo.left || fo.sw));
 const nowTask = () => { const it = db.recs[nw.id]; return it && !it.del && !it.done && it.kind === "task" ? it : null; };
 const wakeOn = () => { try { if (navigator.wakeLock && !wl) navigator.wakeLock.request("screen").then((l) => { wl = l; l.addEventListener("release", () => { wl = null; }); }).catch(() => {}); } catch (e) {} };
 const wakeOff = () => { try { if (wl) { wl.release(); wl = null; } } catch (e) {} };
@@ -621,7 +648,7 @@ function dayLeft() {
   let n = d.getHours() * 60 + d.getMinutes(), a = m(s.dayStart), e = m(s.dayEnd), label, frac;
   if (e <= a) e += 1440;
   if (n < a && n + 1440 < e) n += 1440;
-  if (n < a) { label = "day starts at " + s.dayStart; frac = 0; } else if (n >= e) { label = "past your day end"; frac = 1; } else { label = dur(e - n) + " left today"; frac = (n - a) / (e - a); }
+  if (n < a) { label = "day starts at " + ((Math.floor(a / 60) % 12) || 12) + ":" + pad(a % 60) + (a < 720 ? " AM" : " PM"); frac = 0; } else if (n >= e) { label = "past your day end"; frac = 1; } else { label = dur(e - n) + " left today"; frac = (n - a) / (e - a); }
   return { label: fmtTime(Date.now(), O()) + " · " + label, pct: Math.round(frac * 100) };
 }
 function setNow(id, why) {
@@ -654,6 +681,18 @@ function pickNow() {
   return true;
 }
 const openShrink = (prompt) => { np.panel = "shrink"; np.prompt = prompt; };
+// Asks the AI for steps for the task on the Now tab and shows them to accept or reject.
+async function nowAi(kind) {
+  const it = nowTask();
+  if (!it) return;
+  const cur = (it.subs || []).find((x) => !x.d), step = cur ? cur.t : it.step || it.title;
+  np.panel = "ai"; np.ai = { kind, busy: true }; render();
+  try {
+    const r = await aiAsk(kind === "smaller" ? { kind, title: it.title, step } : { kind, title: it.title, notes: it.notes, steps: (it.subs || []).map((x) => x.t) });
+    if (np.panel === "ai" && nw.id === it.id) np.ai = { kind, steps: r.steps.map((t) => ({ t, on: true })) };
+  } catch (e) { if (np.panel === "ai") np.ai = { kind, err: e.message }; }
+  render();
+}
 const STUCK = {
   start: { q: "I don’t know where to start", go: () => openShrink("What would your hands do first? Name something physical.") },
   big: { q: "It feels too big", go: () => openShrink("Cut off a piece you could finish in 2 minutes. What is it?") },
@@ -670,12 +709,13 @@ function foStart(min, starter) {
   const it = nowTask();
   const pick = $("#foRef");
   if (pick) ui.foRef = pick.value;
-  fo = { ref: it ? it.id : (fo && fo.ended && fo.ref) || ui.foRef || "", min, end: Date.now() + min * MIN, starter: !!starter, lastChk: 0 };
+  const ref = it ? it.id : (fo && fo.ended && fo.ref) || ui.foRef || "";
+  fo = min === "sw" ? { ref, sw: 1, start: Date.now(), acc: 0, min: 0, lastChk: 0 } : { ref, min, end: Date.now() + min * MIN, starter: !!starter, lastChk: 0 };
   np.panel = ""; np.stuck = ""; saveFo(); wakeOn(); beep([523]);
 }
 // Adds the time actually spent to the task, so guesses can be compared with reality.
 function foBank() {
-  const left = fo.end ? fo.end - Date.now() : fo.left || 0, secs = Math.max(0, Math.round((fo.min * MIN - Math.max(0, left)) / 1000)), it = db.recs[fo.ref];
+  const left = fo.end ? fo.end - Date.now() : fo.left || 0, secs = fo.sw ? Math.min(4 * 3600, Math.round(swElapsed() / 1000)) : Math.max(0, Math.round((fo.min * MIN - Math.max(0, left)) / 1000)), it = db.recs[fo.ref];
   if (it && it.type === "item" && !it.del && secs) put({ ...it, spent: (it.spent || 0) + secs });
   return secs;
 }
@@ -697,37 +737,49 @@ function foFinish(early, quiet) {
 }
 function foTick() {
   const hd = $("#hdt");
-  if (!fo || !fo.end) { if (hd && !running()) hd.hidden = true; return; }
-  const now = Date.now(), left = fo.end - now;
-  if (left <= 0) return foFinish(false);
-  const em = Math.floor((fo.min * MIN - left) / MIN), ck = +set().chime;
+  if (!ticking()) { if (hd && !running()) hd.hidden = true; return; }
+  const now = Date.now(), left = fo.sw ? 0 : fo.end - now, gone = fo.sw ? swElapsed() : fo.min * MIN - left;
+  if (!fo.sw && left <= 0) return foFinish(false);
+  if (fo.sw && gone >= 4 * 3600e3) { foFinish(true, true); toast("Stopwatch stopped itself at 4 hours and logged them."); return; }
+  const em = Math.floor(gone / MIN), ck = +set().chime;
   if (ck > 0 && em > 0 && em % ck === 0 && fo.lastChk !== em) { fo.lastChk = em; saveFo(); beep([520], 0.3, 0.12); }
-  const el = $("#clock"), w = $("#wedge");
-  if (el) el.textContent = mmss(left);
-  if (w) w.setAttribute("stroke-dasharray", (Math.min(1, left / 3600000) * 169.65).toFixed(2) + " 169.65");
-  if (hd) hd.textContent = "⏱ " + mmss(left) + " left";
-  document.title = mmss(left) + " · Onward";
+  const el = $("#clock"), w = $("#wedge"), shown = fo.sw ? mmss(Math.floor(gone / 1000) * 1000) : mmss(left);
+  if (el) el.textContent = shown;
+  if (w) w.setAttribute("stroke-dasharray", (Math.min(1, (fo.sw ? gone % 3600000 : left) / 3600000) * 169.65).toFixed(2) + " 169.65");
+  if (hd) hd.textContent = "⏱ " + foShown();
+  document.title = shown + " · Onward";
 }
 // A 60 minute dial, so 25 minutes always looks like 25 minutes.
 function dial() {
-  const left = Math.max(0, fo.end ? fo.end - Date.now() : fo.left);
+  const left = fo.sw ? swElapsed() % 3600000 : Math.max(0, fo.end ? fo.end - Date.now() : fo.left);
   let ticks = "";
   for (let i = 0; i < 12; i++) { const a = (i * Math.PI) / 6, x = Math.sin(a), y = -Math.cos(a); ticks += '<line x1="' + (60 + x * 55).toFixed(1) + '" y1="' + (60 + y * 55).toFixed(1) + '" x2="' + (60 + x * 59).toFixed(1) + '" y2="' + (60 + y * 59).toFixed(1) + '"/>'; }
   return '<div class="timer"><svg class="disc" viewBox="0 0 120 120" role="img" aria-label="Time left, shown on a 60 minute dial"><circle class="face" cx="60" cy="60" r="54"/>' +
     '<circle class="wedge" id="wedge" cx="60" cy="60" r="27" stroke-width="54" transform="rotate(-90 60 60)" stroke-dasharray="' + (Math.min(1, left / 3600000) * 169.65).toFixed(2) + ' 169.65"/>' + ticks + '<circle class="hub" cx="60" cy="60" r="3.5"/></svg>' +
-    '<div class="readout"><span class="tleft" id="clock">' + mmss(left) + '</span><span class="hint">' + (fo.end ? "left · ends " + fmtTime(fo.end, O()) : "paused") + '</span><span class="hint">' + (fo.starter ? "You can stop when it ends." : "Full dial is 60 minutes.") + "</span></div></div>";
+    '<div class="readout"><span class="tleft" id="clock">' + (fo.sw ? mmss(Math.floor(swElapsed() / 1000) * 1000) : mmss(left)) + '</span><span class="hint">' + (fo.sw ? (fo.start ? "stopwatch · counting up" : "stopwatch · paused") : fo.end ? "left · ends " + fmtTime(fo.end, O()) : "paused") +
+    '</span><span class="hint">' + (fo.sw ? "Runs until you finish it." : fo.starter ? "You can stop when it ends." : "Full dial is 60 minutes.") + "</span></div></div>";
 }
 function timerBox(hasStep) {
   const step = hasStep ? '<button class="btn" data-a="nwStepDone">Step done</button>' : "";
-  if (running()) return dial() + '<div class="acts">' + step + '<button class="btn ghost" data-a="foPause">' + (fo.end ? "Pause" : "Resume") + '</button><button class="btn ghost" data-a="foStop">Finish early</button><button class="btn ghost" data-a="foReset">Reset</button></div>';
+  if (running()) return dial() + '<div class="acts">' + step + '<button class="btn ghost" data-a="foPause">' + (ticking() ? "Pause" : "Resume") + '</button><button class="btn ghost" data-a="foStop">' + (fo.sw ? "Finish" : "Finish early") + '</button><button class="btn ghost" data-a="foReset">Reset</button></div>';
   if (fo && fo.ended) return '<p class="ended">' + (fo.starter ? "2 minutes done. Starting was the hard part." : dur(fo.min) + " done.") + '</p><div class="acts"><button class="btn" data-a="foStart" data-v="10">Keep going 10 min</button><button class="btn ghost" data-a="foStart" data-v="25">25 min</button>' +
     (hasStep ? '<button class="btn ghost" data-a="nwStepDone">Step done</button>' : '<button class="btn ghost" data-a="foClear">Enough for now</button>') + "</div>";
-  return '<button class="btn big" data-a="foStart" data-v="2" data-s="1">Start with 2 minutes</button><div class="commit"><span>Or commit to</span>' + [10, 25, 45].map((n) => '<button class="chip" data-a="foStart" data-v="' + n + '">' + n + " min</button>").join("") + "</div>" +
+  const last = +lsGet("onward.custom") || 0;
+  return '<button class="btn big" data-a="foStart" data-v="2" data-s="1">Start with 2 minutes</button><div class="commit"><span>Or commit to</span>' + [10, 25, 45].concat(last && ![2, 10, 25, 45].includes(last) ? [last] : []).map((n) => '<button class="chip" data-a="foStart" data-v="' + n + '">' + n + " min</button>").join("") + "</div>" +
+    '<div class="commit"><span>Custom</span><input class="in mini" id="foCustom" type="number" min="1" max="600" inputmode="numeric" placeholder="min" aria-label="Custom timer length in minutes"><button class="chip" data-a="foCustom">Start</button><button class="chip" data-a="foStart" data-v="sw">⏱ Stopwatch</button></div>' +
     (hasStep ? '<div class="acts"><button class="btn ghost" data-a="nwStepDone">Step done</button></div>' : "");
 }
 function panelHtml() {
   const cancel = '<button class="link" data-a="nwClose">Cancel</button>';
-  if (np.panel === "shrink") return '<div class="panel"><label for="nwShrink">' + esc(np.prompt) + '</label><input class="in" id="nwShrink" type="text" autocomplete="off" placeholder="A smaller step"><div class="acts"><button class="btn" data-a="nwShrinkGo">Do this first</button>' + cancel + "</div></div>";
+  if (np.panel === "ai") {
+    const a = np.ai || {}, again = '<button class="btn ghost" data-a="' + (a.kind === "smaller" ? "aiSmaller" : "aiSteps") + '">Try again</button>';
+    if (a.busy) return '<div class="panel"><p class="q">✨ Thinking of small steps…</p><p class="hint">This usually takes a few seconds.</p>' + cancel + "</div>";
+    if (a.err) return '<div class="panel"><p class="q">No suggestions this time</p><p class="hint">' + esc(a.err) + '</p><div class="acts">' + again + cancel + "</div></div>";
+    return '<div class="panel"><p class="q">✨ Suggested ' + (a.kind === "smaller" ? "smaller steps" : "steps") + '</p><p class="hint" style="margin-bottom:8px">Tap any you don’t want. You can edit them later.</p>' +
+      a.steps.map((x, i) => '<button class="aistep" data-a="aiToggle" data-i="' + i + '" aria-pressed="' + x.on + '"><span class="chk sq" aria-pressed="' + x.on + '"></span>' + esc(x.t) + "</button>").join("") +
+      '<div class="acts"><button class="btn" data-a="aiAdd">Add ' + a.steps.filter((x) => x.on).length + " steps</button>" + again + cancel + "</div></div>";
+  }
+  if (np.panel === "shrink") return '<div class="panel"><label for="nwShrink">' + esc(np.prompt) + '</label><input class="in" id="nwShrink" type="text" autocomplete="off" placeholder="A smaller step"><div class="acts"><button class="btn" data-a="nwShrinkGo">Do this first</button><button class="btn soft" data-a="aiSmaller">✨ Suggest for me</button>' + cancel + "</div></div>";
   if (np.panel === "park") return '<div class="panel"><label for="nwPark">Where are you leaving off? (optional)</label><input class="in" id="nwPark" type="text" autocomplete="off" placeholder="A note for when you come back"><div class="acts"><button class="btn" data-a="nwParkGo">Park it</button>' + cancel + "</div></div>";
   if (np.panel === "stuck") {
     if (np.stuck) { const r = STUCK[np.stuck]; return '<div class="panel"><p class="q">' + esc(r.q) + "</p><p>" + esc(r.tip) + '</p><div class="acts"><button class="btn" data-a="nwTactic">' + esc(r.btn) + '</button><button class="link" data-a="nwStuck">Back</button></div></div>'; }
@@ -738,10 +790,10 @@ function panelHtml() {
 const dumpForm = () => '<textarea class="in" id="dumpText" rows="5" placeholder="One thing per line. Messy is fine."></textarea><button class="btn" style="margin-top:8px" data-a="dumpGo">Add to my list</button>';
 function vFocus() {
   const o = O(), t = today(), start = startToday(), it = nowTask();
-  let h = "";
+  let h = "", tail = "";
   if (!it) {
     const open = items().filter((i) => i.kind === "task" && !i.done && !i.shelf);
-    if (!open.length) h += '<div class="card nowc"><h1 class="step">Nothing on your list.</h1><p class="lede">Write down whatever is taking up space in your head. Sorting comes later.</p>' + dumpForm() + "</div>";
+    if (!open.length) tail = '<div class="card nowc"><h1 class="step">Nothing on your list.</h1><p class="lede">Write down whatever is taking up space in your head. Sorting comes later.</p>' + dumpForm() + "</div>";
     else {
       let list = open.filter((i) => i.at != null && i.at < start + DAY).sort(byAt), from = "Today";
       if (!list.length) { list = open.filter((i) => i.at == null).sort((a, b) => (a.created || 0) - (b.created || 0)); from = "From your list, because today is empty"; }
@@ -751,30 +803,31 @@ function vFocus() {
         (x.left || x.est || x.at != null ? '<div class="me">' + [x.at != null ? fmtWhen(x, o, Date.now()) : "", x.est ? "~" + dur(x.est) : "", x.left ? "left off: " + x.left : ""].filter(Boolean).map(esc).join(" · ") + "</div>" : "") + "</div></div>").join("") + "</div>";
     }
     const tk = items().filter((i) => i.kind === "task" && !i.done).sort(byAt).slice(0, 40), hb = habits();
-    h += '<div class="sec">Or just run a timer</div><div class="card nowc">' + (running() || (fo && fo.ended) ? "" : '<select class="in" id="foRef" aria-label="What the timer is for" style="margin-bottom:8px"><option value="">Nothing specific</option>' +
+    h += '<div class="sec">' + (tail ? "Run a timer" : "Or just run a timer") + '</div><div class="card nowc">' + (running() || (fo && fo.ended) ? "" : '<select class="in" id="foRef" aria-label="What the timer is for" style="margin-bottom:8px"><option value="">Nothing specific</option>' +
       (tk.length ? '<optgroup label="Tasks">' + opts(tk.map((i) => [i.id, i.title]), ui.foRef) + "</optgroup>" : "") + (hb.length ? '<optgroup label="Habits">' + opts(hb.map((x) => [x.id, (x.icon ? x.icon + " " : "") + x.name]), ui.foRef) + "</optgroup>" : "") + "</select>") + timerBox(false) + "</div>";
   } else {
     const subs = it.subs || [], n = subs.length, dn = subs.filter((x) => x.d).length, st = subs.find((x) => !x.d) || (!n && it.step ? { t: it.step } : null);
     const park = '<button class="link" data-a="nwPark">Not now</button>';
-    h += '<div class="card nowc"><p class="eyebrow">' + esc(it.title) + "</p>";
+    h += '<div class="card nowc"><p class="eyebrow">' + esc((it.icon ? it.icon + " " : "") + it.title) + "</p>";
     if (nw.why) h += '<p class="why">Picked because ' + esc(nw.why) + '. <button class="link" data-a="nwAnother">Pick another</button></p>';
     if (it.left) h += '<p class="leftoff"><b>Where you left off:</b> ' + esc(it.left) + "</p>";
     if (!st && !n) {
       h += '<h1 class="step">What would your hands do first?</h1><p class="lede">Name something physical and small, like opening the file or putting on shoes.</p>' +
         '<div class="inl"><input class="in" id="nwFirst" type="text" autocomplete="off" placeholder="First tiny step" aria-label="First tiny step"><button class="btn" data-a="nwFirst">Add</button></div>' +
-        '<div class="links"><button class="link" data-a="nwOne">It is one step. Just start.</button>' + park + '<button class="link" data-a="nwEdit">Edit task</button></div>' + (np.panel === "park" ? panelHtml() : "");
+        (np.panel ? "" : '<button class="btn soft" style="margin-top:10px;width:100%" data-a="aiSteps">✨ Break it down for me</button>') +
+        '<div class="links"><button class="link" data-a="nwOne">It is one step. Just start.</button>' + park + '<button class="link" data-a="nwEdit">Edit task</button></div>' + (np.panel ? panelHtml() : "");
     } else if (!st) {
       h += '<h1 class="step">All steps done. Is the whole task finished?</h1><button class="btn big" data-a="nwFinish">Yes, finished</button>' +
-        '<div class="inl"><input class="in" id="nwAdd" type="text" autocomplete="off" placeholder="Or add the next step" aria-label="Next step"><button class="btn ghost" data-a="nwAdd">Add</button></div><div class="links">' + park + "</div>" + (np.panel === "park" ? panelHtml() : "");
+        '<div class="inl"><input class="in" id="nwAdd" type="text" autocomplete="off" placeholder="Or add the next step" aria-label="Next step"><button class="btn ghost" data-a="nwAdd">Add</button></div><div class="links"><button class="link" data-a="aiSteps">✨ Suggest next steps</button>' + park + "</div>" + (np.panel ? panelHtml() : "");
     } else {
       let dots = "";
       for (const x of subs) dots += '<i class="' + (x.d ? "d" : x === st ? "c" : "") + '"></i>';
       h += '<h1 class="step">' + esc(st.t) + "</h1>" + (n ? '<p class="prog"><span>Step ' + (dn + 1) + " of " + n + '</span><span class="dots" aria-hidden="true">' + dots + "</span></p>" : "");
-      h += np.panel ? panelHtml() : timerBox(true) + '<div class="links"><button class="link" data-a="nwShrink">Make it smaller</button><button class="link" data-a="nwStuck">I’m stuck</button>' + park + '<button class="link" data-a="nwEdit">Edit task</button></div>';
+      h += np.panel ? panelHtml() : timerBox(true) + '<div class="links"><button class="link" data-a="nwShrink">Make it smaller</button><button class="link" data-a="nwStuck">I’m stuck</button><button class="link" data-a="aiSteps">✨ Suggest steps</button>' + park + '<button class="link" data-a="nwEdit">Edit task</button></div>';
     }
     h += it.est ? '<p class="guess"><span>Your guess: ' + dur(it.est) + " · tracked so far: " + dur((it.spent || 0) / 60) + '</span><button class="link" data-a="nwGuess" data-v="0">Change</button></p>'
       : '<div class="guess"><span>Guess the whole task:</span>' + [[5, "5 min"], [15, "15 min"], [30, "30 min"], [60, "1 h"], [120, "2 h"]].map((g) => '<button class="chip" data-a="nwGuess" data-v="' + g[0] + '">' + g[1] + "</button>").join("") + "</div>";
-    if (n) h += '<details class="allsteps"><summary>All steps (' + n + ")</summary><ol>" + subs.map((x) => '<li class="' + (x.d ? "d" : x === st ? "c" : "") + '">' + esc(x.t) + "</li>").join("") +
+    if (n) h += '<details class="allsteps" id="allSteps"' + (ui.stepsOpen ? " open" : "") + "><summary>All steps (" + n + ")</summary><ol>" + subs.map((x) => '<li class="' + (x.d ? "d" : x === st ? "c" : "") + '">' + esc(x.t) + "</li>").join("") +
       '</ol><div class="inl"><input class="in" id="nwAdd" type="text" autocomplete="off" placeholder="Add a later step" aria-label="Add a later step"><button class="btn ghost" data-a="nwAdd">Add</button></div></details>';
     h += "</div>";
   }
@@ -791,14 +844,14 @@ function vFocus() {
     h += '<div class="card nowc"><p>Across ' + hs.length + (hs.length === 1 ? " task" : " tasks") + ", things took <b>" + r.toFixed(1) + "×</b> your guess." + (hs.length >= 3 && r > 1.15 ? " Multiply your next guess by " + r.toFixed(1) + "." : "") + "</p>" +
       hs.slice(-6).reverse().map((x) => '<p class="hint" style="margin-top:6px"><b>' + (x.actual / x.est).toFixed(1) + "×</b> " + esc(x.title) + ": guessed " + dur(x.est) + ", tracked " + dur(x.actual) + "</p>").join("") + "</div>";
   }
-  return h;
+  return h + (tail ? '<div style="height:14px"></div>' + tail : "");
 }
 
 // ---------- shell ----------
 function drawTop() {
   const g = game(), o = O(), d = loc(Date.now(), o);
   const title = ui.tab === "today" ? WD[d.getUTCDay()] + " " + d.getUTCDate() + " " + MO[d.getUTCMonth()] : TABS.find((t) => t[0] === ui.tab)[1];
-  const tmr = running() && ui.tab !== "focus" ? '<button class="hdt" id="hdt" data-a="tab" data-v="focus" aria-label="Go to the running timer">⏱ ' + mmss(fo.end ? fo.end - Date.now() : fo.left) + " left</button>" : "";
+  const tmr = running() && ui.tab !== "focus" ? '<button class="hdt" id="hdt" data-a="tab" data-v="focus" aria-label="Go to the running timer">⏱ ' + foShown() + "</button>" : "";
   $("#top").innerHTML = '<div class="grow"><h1>' + title + '</h1><div class="sub">' + (tmr || TITLES[Math.min(g.L, TITLES.length) - 1]) + "</div></div>" +
     '<span class="pill fire" title="Day streak. ❄ are streak freezes that cover a missed day.">🔥 ' + g.streak + (g.freezes ? " · ❄" + g.freezes : "") + "</span>" +
     '<div class="lvl" title="' + g.xp + ' XP in total"><b>Lv ' + g.L + "<span>" + g.cur + "/" + g.need + '</span></b><div class="bar"><i style="width:' + Math.round((100 * g.cur) / g.need) + '%"></i></div></div>' +
@@ -817,12 +870,14 @@ function render() {
   if (drag) { drag.stale = true; return; }
   $("#names").innerHTML = pastNames().map((n) => '<option value="' + esc(n) + '">').join("");
   const main = $("#main"), a = document.activeElement, keep = a && a.id && main.contains(a) ? { id: a.id, v: a.value, s: a.selectionStart } : null, y = main.scrollTop;
-  const qa = $("#qa"), qaVal = qa ? qa.value : "";
+  const drafts = {};
+  for (const el of $$("input[id], textarea[id], select[id]", main)) if (el.type !== "search" && el.value !== "") drafts[el.id] = el.value;
   $("#nav").innerHTML = '<div class="brand">Onward</div>' + TABS.map(([k, l]) => '<button data-a="tab" data-v="' + k + '"' + (ui.tab === k ? ' aria-current="page"' : "") + ">" + ICON[k] + "<span>" + l + "</span></button>").join("");
   drawTop();
   main.innerHTML = { today: vToday, tasks: vTasks, cal: vCal, habits: vHabits, focus: vFocus }[ui.tab]();
   main.scrollTop = y;
-  if ($("#qa") && qaVal) { $("#qa").value = qaVal; $("#qap").textContent = quickPreview(qaVal); }
+  for (const id in drafts) { const el = document.getElementById(id); if (el && main.contains(el)) el.value = drafts[id]; }
+  if ($("#qa") && $("#qa").value) $("#qap").textContent = quickPreview($("#qa").value);
   if (keep) { const el = document.getElementById(keep.id); if (el) { el.value = keep.v; el.focus(); try { el.setSelectionRange(keep.s, keep.s); } catch (e) {} } }
 }
 const done = () => { checkQuests(); render(); };
@@ -884,9 +939,12 @@ function closeSheet(skip, fromBack) {
   done();
 }
 function setBody(html) {
-  const b = $("#sheet .shb"), y = b.scrollTop, a = document.activeElement;
+  const b = $("#sheet .shb"), y = b.scrollTop, a = document.activeElement, open = $$("details", b).map((d) => d.open);
   const k = a && b.contains(a) && a.dataset.f ? '[data-f="' + a.dataset.f + '"]' + (a.dataset.i ? '[data-i="' + a.dataset.i + '"]' : "") : "";
-  b.innerHTML = html; b.scrollTop = y;
+  b.innerHTML = html;
+  const ds = $$("details", b);
+  if (ds.length === open.length) ds.forEach((d, i) => { d.open = open[i]; });
+  b.scrollTop = y;
   if (k && $(k, b)) $(k, b).focus();
 }
 const chipBtn = (a, v, l, on, extra) => '<button class="chip" data-a="' + a + '" data-v="' + esc(v) + '" aria-pressed="' + !!on + '"' + (extra || "") + ">" + l + "</button>";
@@ -916,6 +974,7 @@ function editItem(id, preset) {
     rs: !r ? "" : wd5 ? "wd" : (r.n || 1) > 1 ? "c" : r.f, cn: r ? r.n || 1 : 2, cu: r ? r.f : "d", days: r && r.days && !wd5 ? r.days.slice() : [] };
   openSheet(ex ? "Edit" : "New", edBody(), saveEd, "Save");
 }
+const edSugHtml = () => [...new Set([...(ed.ai || []), ...suggestIcons(ed.it.title)])].filter((e) => e !== ed.it.icon).slice(0, 6).map((e) => '<button class="emo" data-a="edIcon" data-v="' + e + '" aria-label="Use ' + e + '">' + e + "</button>").join("");
 function remRow(r, i) {
   const mode = r.at != null ? "x" : r._c || !PRE.includes(r.off) ? "c" : String(r.off), m = r.off || 0;
   const u = m && m % 10080 === 0 ? 10080 : m && m % 1440 === 0 ? 1440 : m && m % 60 === 0 ? 60 : 1;
@@ -931,6 +990,8 @@ function remRow(r, i) {
 function edBody() {
   const it = ed.it, t = today(), ev = it.kind === "event", wk = ed.rs === "w" || (ed.rs === "c" && ed.cu === "w");
   return '<input class="in title" data-f="title" list="names" autocomplete="off" placeholder="' + (ev ? "What’s happening?" : "What needs doing?") + '" value="' + esc(it.title) + '"' + (ed.isNew ? " autofocus" : "") + ">" +
+    '<div class="iconrow" style="margin-top:10px"><input class="in icn" data-f="icon" maxlength="8" value="' + esc(it.icon || "") + '" placeholder="🙂" aria-label="Icon, one emoji (optional)"><span id="edSug">' + edSugHtml() +
+    '</span><button class="btn ghost sm" data-a="edIconAi" aria-label="Suggest icons with AI">✨ Suggest</button></div>' +
     (ev ? "" : '<div class="f"><input class="in" data-f="step" placeholder="Tiniest first step (optional), e.g. “open the doc”" value="' + esc(it.step || "") + '" aria-label="First tiny step"></div>') +
     '<div class="f chips">' + chipBtn("edKind", "task", "Task", !ev) + chipBtn("edKind", "event", "Event", ev) + "</div>" +
     '<div class="f"><label>When</label><div class="chips" style="margin-bottom:8px">' + [["", "No date"], [t, "Today"], [addDays(t, 1), "Tomorrow"], [addDays(t, 7), "Next week"]].map(([v, l]) => chipBtn("edDk", v, l, ed.dk === v && !(v === "" && it.shelf))).join("") + (ev ? "" : chipBtn("edShelf", "1", "Meaning to", !!it.shelf && !ed.dk)) +
@@ -950,10 +1011,12 @@ function edBody() {
       '<div class="f"><label>Energy it needs</label><div class="chips">' + [["", "Not set"], ["low", "Low"], ["med", "Medium"], ["high", "High"]].map(([v, l]) => chipBtn("edEn", v, l, (it.energy || "") === v)).join("") + "</div></div>") +
     '<div class="f"><label>Tags</label><input class="in" data-f="tags" placeholder="home, study" value="' + esc((it.tags || []).join(", ")) + '" aria-label="Tags, separated by commas"></div>' +
     (ev ? "" : '<div class="f"><label>Subtasks</label>' + it.subs.map((s, i) => '<div class="sub"><button class="chk" data-a="subT" data-i="' + i + '" aria-pressed="' + !!s.d + '" aria-label="Toggle subtask"></button><input class="in" type="text" data-f="sub" data-i="' + i + '" value="' + esc(s.t) + '" aria-label="Subtask"><button class="x" data-a="subDel" data-i="' + i + '" aria-label="Remove subtask">×</button></div>').join("") +
-      '<div class="sub"><input class="in" type="text" id="subNew" data-f="subNew" placeholder="Add a step, then press Enter" aria-label="New subtask"><button class="btn soft sm" data-a="subAdd">Add</button></div></div>') +
+      '<div class="sub"><input class="in" type="text" id="subNew" data-f="subNew" placeholder="Add a step, then press Enter" aria-label="New subtask"><button class="btn soft sm" data-a="subAdd">Add</button></div>' +
+      '<button class="btn ghost sm" data-a="edAi">✨ Suggest steps</button><div class="msg" id="edAiMsg"></div></div>') +
     (!ev && (it.left || it.spent) ? '<div class="f"><label>Where I left off</label><input class="in" data-f="left" value="' + esc(it.left || "") + '" aria-label="Where I left off">' + (it.spent ? '<p class="hint" style="margin-top:6px">Tracked so far: ' + dur(it.spent / 60) + (it.est ? " of a " + dur(it.est) + " guess" : "") + ".</p>" : "") + "</div>" : "") +
     '<div class="f"><label>Notes</label><textarea class="in" data-f="notes" aria-label="Notes">' + esc(it.notes || "") + "</textarea></div>" +
-    '<div class="f r2"><button class="btn" data-a="closeSheet">Save</button>' + (ed.isNew ? '<button class="btn ghost" data-a="cancelSheet">Cancel</button>' : '<button class="btn danger" data-a="delItem">Delete</button>') + "</div>";
+    '<div class="f r2"><button class="btn" data-a="closeSheet">Save</button>' + (ed.isNew ? '<button class="btn ghost" data-a="cancelSheet">Cancel</button>' : '<button class="btn danger" data-a="delItem">Delete</button>') + "</div>" +
+    (ed.isNew ? "" : '<div class="links"><button class="link" data-a="cancelSheet">Discard my changes</button></div>');
 }
 function readForm() {
   if (!ed) return;
@@ -961,6 +1024,7 @@ function readForm() {
   for (const el of $$("#sheet [data-f]")) {
     const f = el.dataset.f, v = el.value, i = +el.dataset.i;
     if (f === "title" || f === "step" || f === "notes" || f === "list") it[f] = v;
+    else if (f === "icon") it.icon = firstGrapheme(v);
     else if (f === "left") it.left = v;
     else if (f === "dk" || f === "tm" || f === "rs" || f === "cu") ed[f] = v;
     else if (f === "cn") ed.cn = Math.max(1, Math.floor(+v) || 1);
@@ -1010,12 +1074,12 @@ function editHabit(id) {
   hd.rems = habitTimes(hd); delete hd.remAt;
   openSheet(ex ? "Edit habit" : "New habit", hdBody(), saveHabit, "Save");
 }
-const sugHtml = () => suggestIcons(hd.name).filter((e) => e !== hd.icon).map((e) => '<button class="emo" data-a="hdIcon" data-v="' + e + '" aria-label="Use ' + e + '">' + e + "</button>").join("");
+const sugHtml = () => [...new Set([...(hd._ai || []), ...suggestIcons(hd.name)])].filter((e) => e !== hd.icon).slice(0, 6).map((e) => '<button class="emo" data-a="hdIcon" data-v="' + e + '" aria-label="Use ' + e + '">' + e + "</button>").join("");
 function hdBody() {
   const freq = hd.freq || 1, tags = tagGroups(habits()).filter((g) => g.key && g.key !== tagKey(hd.tag)).map((g) => g.label);
   return '<input class="in title" data-f="name" id="hdName" list="names" autocomplete="off" placeholder="e.g. Drink water" value="' + esc(hd.name) + '"' + (hd.isNew ? " autofocus" : "") + ">" +
     '<div class="f"><label>Icon</label><div class="iconrow"><input class="in icn" data-f="icon" maxlength="8" value="' + esc(hd.icon || "") + '" placeholder="🙂" aria-label="Icon, one emoji"><span id="hdSug">' + sugHtml() +
-    '</span><button class="btn ghost sm" data-a="hdEmoji">' + (hd._em ? "Fewer" : "More") + "</button></div>" +
+    '</span><button class="btn ghost sm" data-a="hdIconAi" aria-label="Suggest icons with AI">✨ Suggest</button><button class="btn ghost sm" data-a="hdEmoji">' + (hd._em ? "Fewer" : "More") + "</button></div>" +
     (hd._em ? EMOJI_GROUPS.map(([n, list]) => '<div class="swl">' + n + '</div><div class="emojis">' + list.split(" ").map((e) => '<button class="emo" data-a="hdIcon" data-v="' + e + '" aria-label="Use ' + e + '">' + e + "</button>").join("") + "</div>").join("") : "") + "</div>" +
     '<div class="f"><label>Tag</label><input class="in" data-f="tag" autocomplete="off" placeholder="e.g. health, study" value="' + esc(hd.tag || "") + '" aria-label="Tag">' +
     (tags.length ? '<div class="chips" style="margin-top:8px">' + tags.map((t) => '<button class="chip" data-a="hdTag" data-v="' + esc(t) + '">#' + esc(t) + "</button>").join("") + "</div>" : "") + "</div>" +
@@ -1044,7 +1108,7 @@ function saveHabit() {
   if (!h.name) return;
   if (h.isNew && !h.icon && !h._iconSet) h.icon = suggestIcons(h.name)[0] || "";
   h.rems = h.rems.filter(Boolean).sort().slice(0, h.freq || 1);
-  delete h.isNew; delete h._em; delete h._iconSet;
+  delete h.isNew; delete h._em; delete h._iconSet; delete h._ai;
   put(h);
 }
 const swatches = (a, cur) => PAL.map(([name, cols]) => '<div class="swl">' + name + '</div><div class="sw">' + cols.map((c) => '<button data-a="' + a + '" data-v="' + c + '" style="background:' + c +
@@ -1278,8 +1342,8 @@ function toast(msg, undo) {
   setTimeout(() => el.remove(), undo ? 6000 : 3500);
 }
 let actx = null;
-function beep(freqs, len = 0.12, vol = 0.18, type = "sine") {
-  if (!set().sound) return;
+function beep(freqs, len = 0.12, vol = 0.18, type = "sine", always = false) {
+  if (!set().sound && !always) return;
   try {
     actx = actx || new (window.AudioContext || window.webkitAudioContext)();
     if (actx.state === "suspended") actx.resume();
@@ -1331,7 +1395,7 @@ function ring(rec) {
   if (!hasLayer("ring")) pushLayer("ring", () => ringStop(true));
   clearInterval(ringT);
   // Full volume and a harsher tone, so it is as loud as the phone's media volume allows.
-  const buzz = () => { beep([880, 1175, 880, 1175, 880, 1175], 0.2, 1, "square"); if (navigator.vibrate) navigator.vibrate([500, 150, 500, 150, 500]); };
+  const buzz = () => { beep([880, 1175, 880, 1175, 880, 1175], 0.2, 1, "square", true); if (navigator.vibrate) navigator.vibrate([500, 150, 500, 150, 500]); };
   buzz(); ringT = setInterval(buzz, 1500);
   setTimeout(() => { if (ringRec === rec) clearInterval(ringT); }, 5 * MIN);
 }
@@ -1340,12 +1404,13 @@ function ringStop(fromBack) { clearInterval(ringT); ringRec = null; $("#ring").h
 function checkAlarms() {
   const now = Date.now(), s = set();
   let rung = {};
-  try { rung = JSON.parse(sessionStorage.getItem("onward.rung")) || {}; } catch (e) {}
+  try { rung = JSON.parse(lsGet("onward.rung")) || {}; } catch (e) {}
+  for (const k in rung) if (now - rung[k] > DAY) delete rung[k];
   for (const r of [...items(), ...habits()]) {
     for (const f of fires(r, s, now)) {
       const k = f.key + f.at, hi = /:h(\d+)$/.exec(f.key);
       if (hi && ((r.done || {})[today()] || 0) >= habitNeed(r, +hi[1])) continue;
-      if (f.ch.includes("alarm") && f.at <= now && !rung[k]) { rung[k] = 1; try { sessionStorage.setItem("onward.rung", JSON.stringify(rung)); } catch (e) {} ring(r); return; }
+      if (f.ch.includes("alarm") && f.at <= now && !rung[k]) { rung[k] = now; lsSet("onward.rung", JSON.stringify(rung)); ring(r); return; }
     }
   }
 }
@@ -1376,6 +1441,14 @@ const A = {
   },
   pick() { if (pickNow()) setTab("focus", "fwd"); },
   questOpen(el) { const p = quest().picks[+el.dataset.i], r = p && db.recs[p.ref]; if (!r || r.del) return; if (p.t === "habit") { tickHabit(r.id, 1, el); done(); } else editItem(r.id); },
+  questTick(el) {
+    const p = quest().picks[+el.dataset.i], r = p && db.recs[p.ref];
+    if (!r || r.del) return;
+    if (p.t === "habit") tickHabit(r.id, habitDone(r, today()) ? -1 : 1, el);
+    else if (questState(p).ok) untickTask(r.id);
+    else toggleTask(r.id, el);
+    done();
+  },
   lateToday() {
     const o = O(), now = Date.now(), t = today(), start = startToday();
     for (const i of items()) if (i.kind === "task" && !i.done && i.at != null && i.at < start) {
@@ -1464,8 +1537,17 @@ const A = {
     if (v === 1) { beep([700], 0.05); if (navigator.vibrate) navigator.vibrate(10); }
     render();
   },
-  foStart(el) { foStart(+el.dataset.v, !!el.dataset.s); render(); },
-  foPause() { if (fo.end) { fo.left = fo.end - Date.now(); fo.end = 0; wakeOff(); } else { fo.end = Date.now() + fo.left; fo.left = 0; wakeOn(); } saveFo(); render(); },
+  foStart(el) { foStart(el.dataset.v === "sw" ? "sw" : +el.dataset.v, !!el.dataset.s); render(); },
+  foCustom() {
+    const n = Math.floor(+$("#foCustom").value);
+    if (!(n >= 1 && n <= 600)) return toast("Type a length between 1 and 600 minutes.");
+    lsSet("onward.custom", String(n)); foStart(n); render();
+  },
+  foPause() {
+    if (fo.sw) { if (fo.start) { fo.acc = swElapsed(); fo.start = 0; wakeOff(); } else { fo.start = Date.now(); wakeOn(); } }
+    else if (fo.end) { fo.left = fo.end - Date.now(); fo.end = 0; wakeOff(); } else { fo.end = Date.now() + fo.left; fo.left = 0; wakeOn(); }
+    saveFo(); render();
+  },
   foStop: () => foFinish(true),
   foReset() { fo = null; saveFo(); wakeOff(); document.title = "Onward"; toast("Timer reset. Nothing was logged."); render(); },
   foClear() { fo = null; saveFo(); render(); },
@@ -1507,6 +1589,47 @@ const A = {
   nwReason(el) { const r = STUCK[el.dataset.v]; if (r.go) { r.go(); render(); const e = $("#nwShrink"); if (e) e.focus(); } else { np.stuck = el.dataset.v; render(); } },
   nwTactic() { const r = STUCK[np.stuck]; np.panel = ""; np.stuck = ""; r.act(); render(); },
   nwGuess(el) { const it = nowTask(); if (it) put({ ...it, est: +el.dataset.v }); render(); },
+  async aiSteps() { await nowAi("steps"); },
+  async aiSmaller() { await nowAi("smaller"); },
+  aiToggle(el) { const x = np.ai.steps[+el.dataset.i]; x.on = !x.on; render(); },
+  aiAdd() {
+    const it = nowTask(), a = np.ai, add = a.steps.filter((x) => x.on).map((x) => ({ id: uid(), t: x.t, d: 0 }));
+    if (!it || !add.length) return;
+    const subs = (it.subs || []).slice();
+    if (a.kind === "smaller") { const i = subs.findIndex((x) => !x.d); if (!subs.length && it.step) subs.push({ id: uid(), t: it.step, d: 0 }); subs.splice(i < 0 ? 0 : i, 0, ...add); }
+    else subs.push(...add);
+    put({ ...it, subs, step: a.kind === "smaller" ? "" : it.step }); np.panel = ""; np.ai = null;
+    toast("Added " + add.length + (add.length === 1 ? " step." : " steps.")); render();
+  },
+  async edAi() {
+    readForm();
+    const it = ed.it, id = it.id;
+    if (!it.title.trim()) return sMsg("edAiMsg", "Give the task a name first.", "bad");
+    sMsg("edAiMsg", "✨ Thinking of small steps…");
+    try {
+      const r = await aiAsk({ kind: "steps", title: it.title, notes: it.notes, steps: it.subs.map((x) => x.t) });
+      if (!ed || ed.it.id !== id) return;
+      readForm(); for (const t of r.steps) ed.it.subs.push({ id: uid(), t, d: 0 });
+      setBody(edBody()); sMsg("edAiMsg", "Added " + r.steps.length + " suggested steps. Remove any you don’t want.", "ok");
+    } catch (e) { sMsg("edAiMsg", e.message, "bad"); }
+  },
+  edIcon(el) { readForm(); ed.it.icon = el.dataset.v; setBody(edBody()); },
+  async edIconAi() {
+    readForm();
+    const id = ed.it.id;
+    if (!ed.it.title.trim()) return;
+    $("#edSug").innerHTML = '<span class="hint">✨ Thinking…</span>';
+    try { const r = await aiAsk({ kind: "icons", what: "task", title: ed.it.title }); if (!ed || ed.it.id !== id) return; readForm(); ed.ai = r.icons; setBody(edBody()); }
+    catch (e) { if (ed && $("#edSug")) $("#edSug").innerHTML = '<span class="hint">' + esc(e.message) + "</span>"; }
+  },
+  async hdIconAi() {
+    readHd();
+    const id = hd.id;
+    if (!hd.name) return;
+    $("#hdSug").innerHTML = '<span class="hint">✨ Thinking…</span>';
+    try { const r = await aiAsk({ kind: "icons", what: "habit", title: hd.name }); if (!hd || hd.id !== id) return; readHd(); hd._ai = r.icons; setBody(hdBody()); }
+    catch (e) { if (hd && $("#hdSug")) $("#hdSug").innerHTML = '<span class="hint">' + esc(e.message) + "</span>"; }
+  },
   foLog() { openSheet("Focus sessions", foLogBody(), null, "Close"); },
   foLogDel(el) { del(el.dataset.id); setBody(foLogBody()); },
   foViz() { openSheet("Minutes focused", foVizBody(), null, "Close"); },
@@ -1569,6 +1692,7 @@ const A = {
     sMsg("mKey", "Checking…");
     try {
       await api("/api/config");
+      for (let g = 0; syncing && g < 60; g++) await new Promise((r) => setTimeout(r, 150));
       for (const id in db.recs) db.dirty[id] = 1; // first connect: offer everything on this device to the server
       db.rev = 0; if (!db.recs.settings) put(set());
       await sync(); sMsg("mKey", "Connected. This device is now in sync.", "ok");
@@ -1581,8 +1705,9 @@ const A = {
   syncOff() { key = ""; lsSet("onward.key", ""); cfg = null; setDot(""); setBody(settingsBody()); sMsg("mKey", "Disconnected. Your data stays on this device.", ""); },
   erase(el) {
     if (!el.dataset.armed) { el.dataset.armed = "1"; el.textContent = "Tap again to erase everything, on every synced device"; return; }
-    for (const r of Object.values(db.recs)) if (!r.del) del(r.id);
-    fo = null; saveFo(); closeSheet(true); toast("Everything was erased.");
+    for (const r of Object.values(db.recs)) if (!r.del && r.id !== "settings") del(r.id);
+    put({ ...DEF, tap: { label: "", value: 0 } }); applyTheme();
+    fo = null; saveFo(); nw = { id: "", why: "" }; saveNw(); closeSheet(true); toast("Everything was erased.");
   },
   async test(el) {
     if (!key) return sMsg("mTest", "Connect sync first.", "bad");
@@ -1660,10 +1785,12 @@ document.addEventListener("change", (e) => {
     sMsg("mBak", "Restored " + d.recs.length + " records.", "ok");
   }).catch((err) => sMsg("mBak", "Could not restore: " + err.message, "bad"));
 });
+document.addEventListener("toggle", (e) => { if (e.target.id === "allSteps") ui.stepsOpen = e.target.open; }, true);
 document.addEventListener("input", (e) => {
   if (e.target.id === "qa") $("#qap").textContent = quickPreview(e.target.value);
   if (e.target.id === "q") { ui.q = e.target.value; render(); }
   if (e.target.id === "hdName" && hd) { hd.name = e.target.value; $("#hdSug").innerHTML = sugHtml(); }
+  if (ed && e.target.dataset.f === "title" && $("#edSug")) { ed.it.title = e.target.value; $("#edSug").innerHTML = edSugHtml(); }
 });
 document.addEventListener("keydown", (e) => {
   const el = e.target;
@@ -1671,6 +1798,7 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "Enter" && el.id === "subNew") { e.preventDefault(); A.subAdd(); }
   else if (e.key === "Enter" && (el.id === "hdName" || (el.dataset && el.dataset.f === "title"))) { e.preventDefault(); closeSheet(); }
   else if (e.key === "Enter" && { nwFirst: 1, nwAdd: 1, nwShrink: 1, nwPark: 1 }[el.id]) { e.preventDefault(); A[{ nwFirst: "nwFirst", nwAdd: "nwAdd", nwShrink: "nwShrinkGo", nwPark: "nwParkGo" }[el.id]](); }
+  else if (e.key === "Enter" && el.id === "foCustom") { e.preventDefault(); A.foCustom(); }
   else if (e.key === "Enter" && el.id === "eName") { e.preventDefault(); A.tapSaveGo({ dataset: { v: "0" } }); }
   else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && el.classList && el.classList.contains("grip")) { e.preventDefault(); moveHabit(el.dataset.id, e.key === "ArrowUp" ? -1 : 1); }
   else if ((e.key === "Enter" || e.key === " ") && el.getAttribute && el.getAttribute("role") === "button") { e.preventDefault(); el.click(); }
@@ -1751,7 +1879,7 @@ applyTheme();
 if (db.recs.settings && db.recs.settings.tzOff !== DEF.tzOff) put({ ...set(), tzOff: DEF.tzOff });
 render();
 window.addEventListener("pagehide", () => { if (saveT) flush(); });
-document.addEventListener("visibilitychange", () => { if (document.hidden) { if (saveT) flush(); } else { sync(); render(); if (fo && fo.end) wakeOn(); } });
+document.addEventListener("visibilitychange", () => { if (document.hidden) { if (saveT) flush(); } else { sync(); render(); if (ticking()) wakeOn(); } });
 window.addEventListener("online", sync);
 setInterval(() => { if (!document.hidden) sync(); }, 60000);
 setInterval(foTick, 500);
@@ -1761,7 +1889,7 @@ setInterval(() => {
   if (today() !== lastDay) { lastDay = today(); memo = null; render(); }
   const lab = $("#dayLab"); if (lab) { const dl = dayLeft(); lab.textContent = dl.label; $("#dayFill").style.width = dl.pct + "%"; }
 }, 30000);
-if (fo && fo.end) wakeOn();
+if (ticking()) wakeOn();
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
   navigator.serviceWorker.addEventListener("message", (e) => {

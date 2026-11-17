@@ -11,6 +11,11 @@
     "binding": "ASSETS"
   },
 
+  // Workers AI, for "break it down" and icon suggestions (free daily allowance).
+  "ai": {
+    "binding": "AI"
+  },
+
   // Reminders are checked once a minute.
   "triggers": {
     "crons": ["* * * * *"]

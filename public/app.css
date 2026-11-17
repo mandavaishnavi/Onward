@@ -51,7 +51,8 @@ h1,h2,h3,p{margin:0}
 /* ---------- header ---------- */
 #top{display:flex;align-items:center;gap:10px;padding:12px 14px 8px}
 @media (min-width:900px){#top{padding:18px 24px 8px}}
-#top h1{font-size:20px;font-weight:700;letter-spacing:-.01em;white-space:nowrap}
+#top h1{font-size:20px;font-weight:700;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#top .sub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #top .sub{font-size:13px;color:var(--muted)}
 .grow{flex:1;min-width:0}
 .pill{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:999px;background:var(--card);border:1px solid var(--line);font-size:13.5px;font-weight:650;white-space:nowrap}
@@ -113,8 +114,9 @@ h1,h2,h3,p{margin:0}
 .quests{padding:12px 14px;margin-top:12px;background:linear-gradient(135deg,var(--gold-bg),var(--card) 70%)}
 .quests h3{font-size:15px;display:flex;align-items:center;gap:8px}
 .quests h3 span{margin-left:auto;font-size:13px;color:var(--gold);font-weight:700}
-.quest{display:flex;align-items:center;gap:10px;padding:8px 0 0;font-size:15px;cursor:pointer}
-.quest .qd{width:20px;height:20px;border-radius:6px;border:2px solid var(--gold);flex:none;display:grid;place-items:center;font-size:13px;color:var(--gold);font-weight:800}
+.quest{display:flex;align-items:center;gap:10px;padding:8px 0 0;font-size:15px}
+.quest .qt{flex:1;min-width:0;cursor:pointer;padding:3px 0;overflow-wrap:anywhere}
+.quest .qd{width:26px;height:26px;border-radius:6px;border:2px solid var(--gold);flex:none;display:grid;place-items:center;font-size:13px;color:var(--gold);font-weight:800}
 .quest.ok{color:var(--muted);text-decoration:line-through}
 .quest.ok .qd{background:var(--gold);color:var(--card)}
 .pick{width:100%;margin-top:12px}
@@ -334,3 +336,14 @@ button.stat span{color:var(--accent);font-weight:600}
 /* "Meaning to" offer on Today */
 .shelfc{padding:14px;margin-top:12px;border-style:dashed}
 .shelfc h3{font-size:18px;margin:4px 0;overflow-wrap:anywhere}
+
+/* AI suggestions */
+.aistep{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:10px 12px;margin-bottom:6px;border:1px solid var(--line);border-radius:12px;background:var(--card);font-size:15.5px}
+.aistep[aria-pressed="false"]{opacity:.5;text-decoration:line-through}
+.aistep .chk{width:22px;height:22px;flex:none}
+
+.in.mini{width:78px;min-height:36px;padding:6px 10px}
+
+/* narrow phones: the date keeps its room; wide screens: habit calendar cells stay compact */
+@media (max-width:380px){.lvl{min-width:52px}.lvl b span{display:none}.pill{padding:5px 8px}#top{gap:8px}}
+@media (min-width:900px){.hday{aspect-ratio:auto;height:52px}}

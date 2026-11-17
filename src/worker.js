@@ -5,6 +5,7 @@
 //   DB       D1 database binding
 //   APP_KEY  secret text: the passphrase you type into the app on each device
 //   ASSETS   static assets binding (declared in wrangler.jsonc)
+//   AI       Workers AI binding (declared in wrangler.jsonc), for step and icon suggestions
 // Telegram and email details are entered inside the app (Settings) and stored
 // in the database, so there is nothing else to configure here.
 
@@ -61,11 +62,12 @@ const upsert = (env, rec, rev) => env.DB.prepare(
 // fired are rebuilt; a nag that is mid-way keeps going unless the task is gone or done.
 function sched(env, rec, set, now) {
   const dead = rec.del || (rec.type === "item" && rec.done) ? 1 : 0;
-  const out = [env.DB.prepare("DELETE FROM rem WHERE rid = ? AND sent = 0 AND (fired = 0 OR ? = 1)").bind(rec.id, dead)];
+  // A pending snooze survives ordinary edits; it only goes when the task is done or deleted.
+  const out = [env.DB.prepare("DELETE FROM rem WHERE rid = ? AND sent = 0 AND ((fired = 0 AND rk NOT LIKE '%:snz') OR ? = 1)").bind(rec.id, dead)];
   for (const f of fires(rec, set, now)) {
     out.push(env.DB.prepare(
       "INSERT OR IGNORE INTO rem (rk, orig, rid, fire, ch, nag, nleft) VALUES (?, ?, ?, ?, ?, ?, ?)"
-    ).bind(f.key, f.at, rec.id, f.at, JSON.stringify(f.ch), f.nag, f.nag ? 5 : 0));
+    ).bind(f.key, f.at, rec.id, f.at, JSON.stringify(f.ch), f.nag, f.nag ? 4 : 0));
   }
   return out;
 }
@@ -337,6 +339,60 @@ async function tick(env) {
   if (new Date(now).getUTCMinutes() === 7) await env.DB.prepare("DELETE FROM rem WHERE sent = 1 AND fire < ?").bind(now - 3 * DAY).run();
 }
 
+// ---------- AI suggestions (Cloudflare Workers AI) ----------
+// Used only when you tap a suggest button. It is sent the name, your notes and the
+// existing steps of that one task, nothing else.
+const AI_MODELS = ["@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/meta/llama-3.1-8b-instruct-fp8-fast"];
+function aiText(r) {
+  if (!r) return "";
+  const x = r.response != null ? r.response : r.choices && r.choices[0] && r.choices[0].message ? r.choices[0].message.content : r.output_text != null ? r.output_text : "";
+  return typeof x === "string" ? x : JSON.stringify(x);
+}
+function pickJson(text) {
+  try { return JSON.parse(text); } catch (e) {}
+  const m = /\{[\s\S]*\}/.exec(text);
+  if (m) { try { return JSON.parse(m[0]); } catch (e) {} }
+  return null;
+}
+export async function aiSuggest(env, b) {
+  if (!env.AI) return { status: 503, error: "AI is not switched on for this Worker yet. Redeploy it with the “ai” binding from wrangler.jsonc." };
+  const clip = (x, n) => String(x == null ? "" : x).replace(/\s+/g, " ").trim().slice(0, n);
+  const kind = b.kind === "icons" ? "icons" : b.kind === "smaller" ? "smaller" : "steps";
+  const title = clip(b.title, 200), have = (Array.isArray(b.steps) ? b.steps : []).map((x) => clip(x, 90)).filter(Boolean).slice(0, 20);
+  if (!title) return { status: 400, error: "Give it a name first." };
+  let system, user, max = 300;
+  if (kind === "icons") {
+    system = "You pick emoji. Reply with only JSON like {\"icons\":[\"💧\",\"🚰\"]}: five different single emoji that best represent the given " + (b.what === "habit" ? "habit" : "task") + ", best match first. No text.";
+    user = title; max = 60;
+  } else if (kind === "smaller") {
+    system = "You help someone with ADHD who is stuck on one step of a task. Split that step into 2 or 3 smaller physical actions, in order. The first must take under two minutes and be something the hands can do right now. Each is at most 8 words, starts with a verb, plain language, no numbering. Reply with only JSON like {\"steps\":[\"...\"]}.";
+    user = "Task: " + title + "\nStuck on this step: " + clip(b.step, 120);
+  } else {
+    system = "You help someone with ADHD get started on a task. Break it into 3 to 6 small, concrete steps in the order they would be done. The first step must take under two minutes and be something the hands can do right now, such as opening a file or picking something up. Each step is at most 8 words, starts with a verb, plain language, no numbering, no explanations. Do not repeat steps that already exist. Reply with only JSON like {\"steps\":[\"...\"]}.";
+    user = "Task: " + title + (clip(b.notes, 400) ? "\nNotes: " + clip(b.notes, 400) : "") + (have.length ? "\nSteps that already exist: " + have.join("; ") + "\nSuggest only the steps that are still missing." : "");
+  }
+  let text = "", err = "";
+  for (const model of env.AI_MODEL ? [env.AI_MODEL] : AI_MODELS) {
+    try {
+      text = aiText(await env.AI.run(model, { messages: [{ role: "system", content: system }, { role: "user", content: user }], max_tokens: max, temperature: 0.4 }));
+      if (text) break;
+    } catch (e) { err = String(e && e.message || e); }
+  }
+  if (!text) return { status: 502, error: /limit|quota|allocation|neuron/i.test(err) ? "Today’s free AI allowance is used up. It resets at 5:30 AM India time." : "The AI did not answer" + (err ? ": " + err.slice(0, 140) : ".") };
+  const out = pickJson(text) || {};
+  if (kind === "icons") {
+    const src = Array.isArray(out.icons) ? out.icons.join(" ") : text, icons = [];
+    for (const m of src.matchAll(/\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic}\uFE0F?)*/gu)) if (!icons.includes(m[0])) icons.push(m[0]);
+    return icons.length ? { icons: icons.slice(0, 6) } : { status: 502, error: "The AI gave nothing usable. Try again." };
+  }
+  const seen = new Set(have.map((x) => x.toLowerCase())), steps = [];
+  for (const raw of Array.isArray(out.steps) ? out.steps : text.split(/\n+/)) {
+    const t = clip(String(raw).replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").replace(/^["'“]+|["'”.]+$/g, ""), 90);
+    if (t && !/^[{}\[\]]/.test(t) && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); steps.push(t); }
+  }
+  return steps.length ? { steps: steps.slice(0, kind === "smaller" ? 3 : 6) } : { status: 502, error: "The AI gave nothing usable. Try again." };
+}
+
 // ---------- settings that live on the server ----------
 async function handleConfig(req, env) {
   if (req.method === "POST") {
@@ -391,6 +447,10 @@ async function api(req, env, url) {
     return J({ ok: true });
   }
   if (p === "/api/tg/link" && req.method === "POST") return handleTgLink(env);
+  if (p === "/api/ai" && req.method === "POST") {
+    const r = await aiSuggest(env, await req.json().catch(() => ({})));
+    return J(r, r.status || 200);
+  }
   if (p === "/api/test" && req.method === "POST") {
     const b = await req.json().catch(() => ({}));
     const ch = ["push", "alarm", "tg", "email"].includes(b.ch) ? b.ch : "push";

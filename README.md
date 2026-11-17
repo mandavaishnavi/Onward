@@ -16,6 +16,9 @@ A personal tasks + calendar + habits app for phone and laptop, hosted on Cloudfl
   where you left off, guess vs. tracked time, a "left today" bar and a brain dump.
   A session log, and charts of minutes focused by day, week or month, filtered by
   tasks, habits or tag.
+- **AI suggestions** (Cloudflare Workers AI, free daily allowance): "Break it down for
+  me" turns a task into small steps, and "Suggest" offers icons for tasks and habits.
+  Only that one task's name, notes and steps are sent, and only when you tap.
 - **Meaning to**: a shelf for things with no date in mind. Type "someday" in quick add.
   Today offers one a day (Today / Not today / Let it go); after a month it asks if you
   still want it. Finishing one earns bonus XP for the wait.
@@ -75,6 +78,8 @@ Each channel also has a **Send a test** button.
 - Reminders are checked once a minute, so they can arrive up to a minute late.
 - Times use your device's fixed UTC offset (correct for India; no daylight saving).
 - If the same record is edited on two devices while both are offline, the later edit wins.
+- AI suggestions need a connection and sync turned on. They use open models, so treat
+  the steps as a starting point.
 - Not built yet from TickTick: Kanban, Eisenhower matrix, timeline, countdowns,
   statistics pages, sharing/collaboration, widgets, calendar subscriptions.
 

@@ -86,6 +86,13 @@ export function occurrences(it, off, from, to) {
   }
   return out;
 }
+// The first occurrence at or after `from` (for showing a repeating event's next date).
+export function occFrom(it, off, from) {
+  if (it.at == null || !it.rep) return it.at;
+  let cur = it.at, g = 0;
+  while (cur < from && g++ < 4000) cur = step(cur, it.rep, off);
+  return cur;
+}
 export function repText(rep) {
   if (!rep) return "";
   const n = rep.n || 1;
