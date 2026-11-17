@@ -9,7 +9,7 @@
 // Telegram and email details are entered inside the app (Settings) and stored
 // in the database, so there is nothing else to configure here.
 
-import { fires, complete, taskLog, habitNeed, tz, dayKey, keyTs, MIN, DAY, uid, fmtWhen } from "../public/shared.js";
+import { fires, complete, taskLog, habitNeed, quietUntil, fmtTime, tz, dayKey, keyTs, MIN, DAY, uid, fmtWhen } from "../public/shared.js";
 
 const enc = new TextEncoder();
 const J = (b, s = 200) => new Response(JSON.stringify(b), {
@@ -296,17 +296,20 @@ async function tick(env) {
       const hi = /:h(\d+)$/.exec(r.rk), need = hi ? habitNeed(rec, Number(hi[1])) : rec.freq || 1;
       if (((rec.done || {})[dayKey(now, o)] || 0) >= need) live = false;
     }
+    let ch = [];
+    try { ch = JSON.parse(r.ch); } catch (e) {}
+    // Quiet hours: anything that is not an alarm waits until the window ends.
+    const hold = live && !ch.includes("alarm") ? quietUntil(set, now) : 0;
+    if (hold) { await env.DB.prepare("UPDATE rem SET fire = ? WHERE rk = ? AND orig = ?").bind(hold, r.rk, r.orig).run(); continue; }
     const again = live && rec.type === "item" && r.nleft > 0;
     // Mark first, send second: if sending crashes, the reminder is not repeated forever.
     if (again) await env.DB.prepare("UPDATE rem SET fire = ?, nleft = nleft - 1, fired = fired + 1 WHERE rk = ? AND orig = ?").bind(now + r.nag * MIN, r.rk, r.orig).run();
     else await env.DB.prepare("UPDATE rem SET sent = 1, fired = fired + 1 WHERE rk = ? AND orig = ?").bind(r.rk, r.orig).run();
     if (live) {
-      let ch = [];
-      try { ch = JSON.parse(r.ch); } catch (e) {}
-      const isHabit = rec.type === "habit", nagging = r.fired > 0;
+      const isHabit = rec.type === "habit", nagging = r.fired > 0, held = !nagging && r.fire - r.orig > 5 * MIN && !/:snz$/.test(r.rk);
       const msg = {
         title: (ch.includes("alarm") ? "⏰ " : "") + (isHabit ? rec.name : rec.title),
-        body: isHabit ? "Habit check-in. One tap counts." : (nagging ? "Still waiting on this one. " : "") + fmtWhen(rec, o, now) + (rec.step ? "\nFirst step: " + rec.step : ""),
+        body: (held ? "Held during quiet hours (was due " + fmtTime(r.orig, o) + "). " : "") + (isHabit ? "Habit check-in. One tap counts." : (nagging ? "Still waiting on this one. " : "") + fmtWhen(rec, o, now) + (rec.step ? "\nFirst step: " + rec.step : "")),
         tag: r.rk,
       };
       let res;

@@ -347,3 +347,28 @@ button.stat span{color:var(--accent);font-weight:600}
 /* narrow phones: the date keeps its room; wide screens: habit calendar cells stay compact */
 @media (max-width:380px){.lvl{min-width:52px}.lvl b span{display:none}.pill{padding:5px 8px}#top{gap:8px}}
 @media (min-width:900px){.hday{aspect-ratio:auto;height:52px}}
+
+/* swipe a task row */
+.row.swiping{position:relative;z-index:2;background:var(--card);transition:none}
+.row.swiping::before,.row.swiping::after{position:absolute;top:50%;transform:translateY(-50%);font-weight:700;font-size:14.5px;white-space:nowrap}
+.row.swiping::before{content:"✓ Done";right:calc(100% + 16px);color:var(--accent)}
+.row.swiping::after{content:"Tomorrow →";left:calc(100% + 16px);color:var(--late)}
+.row[data-sw="done"]{background:var(--soft)}
+.row[data-sw="later"]{background:var(--gold-bg)}
+/* accent colours */
+.accents{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px}
+.acc{display:flex;flex-direction:column;align-items:center;gap:3px;padding:10px 6px;border:1px solid var(--line);border-radius:12px;background:var(--card);font-size:13.5px;font-weight:600}
+.acc i{width:28px;height:28px;border-radius:99px}
+.acc em{font-style:normal;font-weight:500;font-size:11.5px;color:var(--muted)}
+.acc[aria-pressed="true"]{outline:2.5px solid var(--accent);outline-offset:1px}
+.acc:disabled{opacity:.55}
+/* weekly review bars */
+.wkbars{display:flex;align-items:flex-end;gap:2px;height:96px;padding-bottom:2px}
+.wkb{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:3px;font-size:11px;color:var(--muted)}
+.wkb i{width:60%;max-width:26px;min-height:2px;background:var(--accent);border-radius:4px 4px 0 0}
+.wkb em{font-style:normal;font-weight:700;color:var(--ink)}
+
+.qshuf{margin-left:8px;width:30px;height:30px;border-radius:99px;border:1px solid var(--line);background:var(--card);color:var(--gold);font-size:17px;line-height:1;flex:none}
+
+.chip.del{border-style:dashed;color:var(--danger)}
+.guess .commit{margin:0;flex:1}

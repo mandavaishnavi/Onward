@@ -22,9 +22,16 @@ A personal tasks + calendar + habits app for phone and laptop, hosted on Cloudfl
 - **Meaning to**: a shelf for things with no date in mind. Type "someday" in quick add.
   Today offers one a day (Today / Not today / Let it go); after a month it asks if you
   still want it. Finishing one earns bonus XP for the wait.
+- **Weekly review**: what got done, habits, guess vs. tracked time, and a pass through
+  the Meaning to shelf.
+- **Little things**: swipe a task right to finish it or left to move it to tomorrow;
+  quick add understands "25 Dec", "next month" and "at 5"; repeats can end on a date
+  and single dates can be skipped; accent colours unlock as you level up; long-press
+  the app icon for shortcuts, or share text to Onward from another app.
 - **Reminders**: any number per item. Each one picks its own time (presets, custom
   "N minutes/hours/days/weeks before", or an exact date and time) and its own
-  channels: push, alarm, Telegram, email. Optional nudging until the task is done.
+  channels: push, alarm, Telegram, email. Optional nudging until the task is done, and
+  quiet hours that hold everything except alarms until morning.
 - **Game layer**: XP, levels, a day streak with freezes, three daily quests, confetti.
 - **ADHD-friendly**: "Pick one for me", a "tiniest first step" field, "Just 5 min"
   focus timer, overdue tasks shown as "carried over" with one-tap "move all to today",

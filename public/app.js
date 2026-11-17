@@ -2,7 +2,7 @@
 // Data lives in localStorage as small records and syncs to the Worker when a
 // sync key is set, so the app keeps working offline.
 import { MIN, DAY, WD, MO, uid, tz, loc, dayKey, keyTs, addDays, fmtTime, fmtDay, fmtWhen,
-  occurrences, occFrom, repText, remText, fires, habitTimes, habitNeed, complete, taskLog, level } from "./shared.js";
+  occurrences, occFrom, repOver, repSkipped, step, repText, untilText, remText, fires, habitTimes, habitNeed, complete, taskLog, level } from "./shared.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -81,6 +81,9 @@ function marks(v) {
   if (rem) h += g(rem);
   return '<span class="marks">' + h + "</span>";
 }
+// Accent colours you unlock by levelling up: [id, name, level, light-mode colour, dark-mode colour, light tint, dark tint]
+const ACCENTS = [["teal", "Teal", 1, "#12594F", "#6FCBB8", "#E3F1EE", "#1D302D"], ["ocean", "Ocean", 2, "#1F5FA8", "#8AB8EE", "#E3EDF8", "#1C2A3B"], ["plum", "Plum", 3, "#6B3FA0", "#C3A6EE", "#EFE7F8", "#2A2238"],
+  ["rose", "Rose", 5, "#A8325E", "#F0A3BF", "#F9E6ED", "#38202A"], ["forest", "Forest", 7, "#2F6B2A", "#9AD493", "#E6F2E4", "#1F301E"], ["ember", "Ember", 9, "#A84A14", "#F2B083", "#F8EADF", "#38271B"], ["ink", "Ink", 12, "#26313D", "#D5DEE8", "#E6EAEF", "#252C34"]];
 const TITLES = ["Seedling", "Sprout", "Starter", "Mover", "Builder", "Steady", "In flow", "Trailblazer", "Unstoppable", "Legend"];
 const ICON = {
   today: '<svg viewBox="0 0 24 24"><path d="M4 12l5 5L20 6"/></svg>',
@@ -235,22 +238,31 @@ const shelfAnswered = () => lsSet("onward.shelfDay", today());
 
 // Three small things for today, chosen so there is nothing to decide.
 function quest() {
-  const id = "q-" + today(), start = startToday();
-  let q = db.recs[id] && !db.recs[id].del ? db.recs[id] : { id, type: "quest", picks: [] };
-  // A deleted task stays as a finished quest if it was ticked off today; otherwise it leaves and another takes its place.
-  const kept = q.picks.filter((p) => { const r = db.recs[p.ref]; return r && (!r.del || (p.t === "item" && taskDoneToday(r))); });
-  if (kept.length === q.picks.length && kept.length >= 3) return q;
-  const used = new Set(q.picks.map((p) => p.ref)), picks = kept.slice();
+  const id = "q-" + today(), start = startToday(), t = today();
+  const cur = db.recs[id] && !db.recs[id].del ? db.recs[id] : { id, type: "quest", picks: [], rot: 0 };
+  const isDone = (p) => { const r = db.recs[p.ref]; return !!r && (p.t === "habit" ? !r.del && habitDone(r, t) : taskDoneToday(r)); };
+  // Finished quests are locked in (even if the task is deleted afterwards). Every other slot is
+  // chosen again from what matters most right now, so a task added later can still become a quest.
+  const used = new Set(cur.picks.filter(isDone).map((p) => p.ref)), fresh = [];
   const open = items().filter((i) => i.kind === "task" && !i.done && !i.shelf);
-  const due = open.filter((i) => i.at != null && i.at < start + DAY).sort((a, b) => (b.pri || 0) - (a.pri || 0) || a.at - b.at);
-  const easy = open.filter((i) => (i.energy === "low" || (i.est && i.est <= 15)) && (i.at == null || i.at < start + DAY));
-  const old = open.filter((i) => i.at == null).sort((a, b) => (a.created || 0) - (b.created || 0));
-  const hs = habits().filter((h) => !habitDone(h, today()));
-  const take = (arr, t) => { const x = arr.find((i) => !used.has(i.id)); if (x && picks.length < 3) { used.add(x.id); picks.push({ ref: x.id, t }); } };
-  if (!picks.some((p) => p.t === "habit")) take(hs, "habit");
-  take(due, "item"); take(easy, "item"); take(due, "item"); take(old, "item"); take(old, "item");
-  if (picks.length !== q.picks.length || kept.length !== q.picks.length) q = put({ ...q, picks });
-  return q;
+  const turn = (arr) => { const n = arr.length ? (cur.rot || 0) % arr.length : 0; return arr.slice(n).concat(arr.slice(0, n)); }; // "Shuffle" moves along each list
+  const due = turn(open.filter((i) => i.at != null && i.at < start + DAY).sort((a, b) => (b.pri || 0) - (a.pri || 0) || a.at - b.at));
+  const easy = turn(open.filter((i) => (i.energy === "low" || (i.est && i.est <= 15)) && (i.at == null || i.at < start + DAY)).sort((a, b) => (a.est || 99) - (b.est || 99)));
+  const old = turn(open.filter((i) => i.at == null).sort((a, b) => (b.pri || 0) - (a.pri || 0) || (a.created || 0) - (b.created || 0)));
+  const hs = turn(habits().filter((h) => !habitDone(h, t)));
+  const room = () => used.size < 3;
+  const take = (arr, ty) => { const x = arr.find((i) => !used.has(i.id)); if (x && room()) { used.add(x.id); fresh.push({ ref: x.id, t: ty }); } };
+  if (!cur.picks.some((p) => p.t === "habit" && isDone(p))) take(hs, "habit");
+  take(due, "item"); take(easy, "item");
+  for (const [arr, ty] of [[due, "item"], [old, "item"], [hs, "habit"]]) for (let g = 0; g < 3 && room(); g++) take(arr, ty); // fill whatever is still empty
+  // Keep every quest in the slot it already had where possible, so the list does not jump around.
+  const picks = [], stay = new Set(fresh.map((p) => p.ref));
+  for (let k = 0; k < 3; k++) { const p = cur.picks[k]; if (p && (isDone(p) || stay.has(p.ref))) { picks[k] = p; stay.delete(p.ref); } }
+  const rest = fresh.filter((p) => stay.has(p.ref));
+  for (let k = 0; k < 3 && rest.length; k++) if (!picks[k]) picks[k] = rest.shift();
+  const out = picks.filter(Boolean);
+  if (JSON.stringify(out) === JSON.stringify(cur.picks)) return cur;
+  return put({ ...cur, picks: out });
 }
 const taskDoneToday = (r) => { const o = O(), t = today(); return !!r.done || logs().some((l) => l.ref === r.id && l.k === "task" && dayKey(l.at, o) === t); };
 function questState(p) {
@@ -261,18 +273,20 @@ function questState(p) {
   return { title, ok: p.t === "habit" ? habitDone(r, today()) : taskDoneToday(r) };
 }
 function checkQuests() {
-  const q = db.recs["q-" + today()];
+  const t = today(), q = db.recs["q-" + t], pre = "qb-" + t + "-", live = (id) => db.recs[id] && !db.recs[id].del;
   if (!q || q.del) return;
-  let n = 0;
+  const ok = new Set();
   for (const p of q.picks) {
-    const s = questState(p), id = "qb-" + today() + "-" + p.ref;
-    if (s.ok) { n++; if (!db.recs[id]) { put({ id, type: "log", k: "quest", title: "Quest: " + s.title, at: Date.now(), xp: 15 }); floatXp(15); } }
+    const s = questState(p), id = pre + p.ref;
+    if (!s.ok) continue;
+    ok.add(p.ref);
+    if (!live(id)) { put({ id, type: "log", k: "quest", title: "Quest: " + s.title, at: Date.now(), xp: 15 }); floatXp(15); }
   }
-  const allId = "qa-" + today();
-  if (q.picks.length === 3 && n === 3 && !db.recs[allId]) {
-    put({ id: allId, type: "log", k: "quest", title: "All three quests", at: Date.now(), xp: 30 });
-    toast("All three quests done. +30 XP 🎉"); confetti(null, 40);
-  }
+  // A quest that was unticked gives its bonus back, and leaves the Done list.
+  for (const id in db.recs) if (id.startsWith(pre) && live(id) && !ok.has(id.slice(pre.length))) del(id);
+  const allId = "qa-" + t, all3 = q.picks.length === 3 && ok.size === 3;
+  if (all3 && !live(allId)) { put({ id: allId, type: "log", k: "quest", title: "All three quests", at: Date.now(), xp: 30 }); toast("All three quests done. +30 XP 🎉"); confetti(null, 40); }
+  else if (!all3 && live(allId)) del(allId);
 }
 
 // ================= actions =================
@@ -352,6 +366,23 @@ function parseQuick(text) {
     else r.dk = addDays(t, n * (u === "w" ? 7 : 1));
     return " ";
   });
+  const MONS = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+  const monthNo = (w) => ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(w.slice(0, 3).toLowerCase()) + 1;
+  const ymd = (y, m, d) => y + "-" + pad(m) + "-" + pad(d);
+  // A day and month with no year means the next time that date comes round.
+  const dated = (m0, d, mo, y) => { d = +d; if (d < 1 || d > 31 || mo < 1 || mo > 12) return m0; let k = ymd(y || +t.slice(0, 4), mo, d); if (!y && k < t) k = ymd(+t.slice(0, 4) + 1, mo, d); r.dk = k; return " "; };
+  s = s.replace(/\sday after tomorrow(?=\s)/i, () => { r.dk = addDays(t, 2); return " "; });
+  s = s.replace(new RegExp("\\s(?:on\\s+|by\\s+)?(\\d{1,2})(?:st|nd|rd|th)?\\s+(" + MONS + ")(?:\\s+(\\d{4}))?(?=\\s)", "i"), (m0, d, mo, y) => dated(m0, d, monthNo(mo), +y || 0));
+  s = s.replace(new RegExp("\\s(?:on\\s+|by\\s+)?(" + MONS + ")\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?(?=\\s)", "i"), (m0, mo, d, y) => dated(m0, d, monthNo(mo), +y || 0));
+  s = s.replace(/\s(?:on|by|due)\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?=\s)/i, (m0, d, mo, y) => dated(m0, d, +mo, y ? (+y < 100 ? 2000 + +y : +y) : 0));
+  s = s.replace(/\s(?:on|by)\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)(?=\s)/i, (m0, d) => { // "on the 25th"; a bare "1st draft" is left alone
+    d = +d; if (d < 1 || d > 31) return m0;
+    let [Y, M] = t.split("-").map(Number), k = ymd(Y, M, d);
+    if (k < t) { M++; if (M > 12) { M = 1; Y++; } k = ymd(Y, M, d); }
+    r.dk = k; return " ";
+  });
+  s = s.replace(/\snext month(?=\s)/i, () => { const [Y, M, D] = t.split("-").map(Number), last = new Date(Date.UTC(Y, M + 1, 0)).getUTCDate(); r.dk = new Date(Date.UTC(Y, M, Math.min(D, last))).toISOString().slice(0, 10); return " "; });
+  s = s.replace(/\s(?:this\s+)?weekend(?=\s)/i, () => { const wd = new Date(t + "T00:00:00Z").getUTCDay(); r.dk = addDays(t, wd === 0 || wd === 6 ? 0 : 6 - wd); return " "; });
   s = s.replace(/\s(today|tonight|tomorrow|tmrw|tmr|next week)(?=\s)/i, (m, g) => {
     g = g.toLowerCase();
     if (g === "today") r.dk = t; else if (g === "tonight") { r.dk = t; r.tm = r.tm || "20:00"; } else r.dk = addDays(t, g === "next week" ? 7 : 1);
@@ -359,7 +390,10 @@ function parseQuick(text) {
   });
   s = s.replace(/\s(?:on\s+|next\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday|mon|tue|wed|thu|fri)(?=\s)/i, (m, g) => { r.dk = nextWd(W3.indexOf(g.slice(0, 3).toLowerCase())); return " "; });
   s = s.replace(/\s(?:at\s+)?(\d{1,2})(?::([0-5]\d))?\s*(am|pm)(?=\s)/i, (m, h, mi, ap) => { r.tm = pad((+h % 12) + (ap.toLowerCase() === "pm" ? 12 : 0)) + ":" + (mi || "00"); return " "; });
-  if (!r.tm) s = s.replace(/\s(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)(?=\s)/, (m, h, mi) => { r.tm = pad(+h) + ":" + mi; return " "; });
+  const pmGuess = (h) => (h >= 1 && h <= 6 ? h + 12 : h); // "at 5" almost always means 5 in the evening
+  if (!r.tm) s = s.replace(/\s(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)(?=\s)/, (m, h, mi) => { r.tm = pad(h.length === 1 ? pmGuess(+h) : +h) + ":" + mi; return " "; });
+  // "at 5" counts only at the very end, so "look at 5 papers" is not read as a time.
+  if (!r.tm) s = s.replace(/\sat\s+(\d{1,2})\s+$/i, (m0, h) => { h = +h; if (h > 23) return m0; r.tm = pad(pmGuess(h)) + ":00"; return " "; });
   if (!r.tm) s = s.replace(/\s(?:at\s+|in the\s+)?(noon|morning|afternoon|evening)(?=\s)/i, (m, g) => { r.tm = { noon: "12:00", morning: "09:00", afternoon: "15:00", evening: "18:00" }[g.toLowerCase()]; return " "; });
   if ((r.tm || r.rep) && !r.dk) { r.dk = t; if (r.tm && keyTs(t, o, ...r.tm.split(":").map(Number)) < now) r.dk = addDays(t, 1); }
   r.title = s.trim().replace(/\s+/g, " ");
@@ -400,16 +434,15 @@ function row(it, opt = {}) {
   if (at != null) meta.push('<span class="' + (late ? "late" : "") + '">' + esc(opt.timeOnly ? (it.allDay ? "All day" : fmtTime(at, o)) : fmtWhen({ at, allDay: it.allDay }, o, now)) + "</span>");
   if (onShelf(it)) meta.push("Meaning to · " + waited(it));
   if (it.kind === "event" && !it.allDay && it.dur) meta.push(it.dur < 60 ? it.dur + " min" : it.dur / 60 + " h");
-  if (it.rep) meta.push("↻ " + esc(repText(it.rep)));
+  if (it.rep) meta.push("↻ " + esc(repText(it.rep) + untilText(it.rep)));
   if (L && !opt.noList) meta.push(esc(L.name));
   if (it.subs && it.subs.length) meta.push(it.subs.filter((s) => s.d).length + "/" + it.subs.length);
-  if ((it.rem || []).length) meta.push("🔔" + (it.nag ? "×" : ""));
   if (it.est) meta.push("~" + it.est + " min");
   for (const t of it.tags || []) meta.push('<span class="tag">#' + esc(t) + "</span>");
   const lead = it.kind === "event"
     ? '<span class="evbar" style="background:' + esc(L ? L.color : "") + '"></span>'
     : '<button class="chk p' + (it.pri || 0) + '" data-a="toggle" data-id="' + it.id + '" aria-pressed="' + !!it.done + '" aria-label="' + (it.done ? "Mark not done: " : "Mark done: ") + esc(it.title) + '"></button>';
-  return '<div class="row' + (it.done ? " done" : "") + (opt.ghost ? " ghost" : "") + '" data-a="edit" data-id="' + it.id + '" role="button" tabindex="0">' + lead +
+  return '<div class="row' + (it.kind === "task" && !opt.ghost ? " task" : "") + (it.done ? " done" : "") + (opt.ghost ? " ghost" : "") + '" data-a="edit" data-id="' + it.id + '" role="button" tabindex="0">' + lead +
     '<div class="rt"><div class="ti">' + esc((it.icon ? it.icon + " " : "") + it.title) + "</div>" + (it.step && !it.done ? '<div class="st">→ ' + esc(it.step) + "</div>" : "") +
     (meta.length ? '<div class="me">' + meta.join(" · ") + "</div>" : "") + "</div></div>";
 }
@@ -422,7 +455,7 @@ const habitRow = (h, m = {}) => {
   return '<div class="hrow" data-id="' + h.id + '">' + lead + '<button class="hbtn' + (full ? " full" : "") + '" style="--hc:' + esc(col) + (full ? ";color:" + inkOn(col) : "") + '" data-a="habit" data-id="' + h.id +
     '" aria-label="Check off ' + esc(h.name) + '">' + (h.icon ? esc(h.icon) : full ? "✓" : "") + (freq > 1 ? '<span class="cnt">' + n + "/" + freq + "</span>" : "") + "</button>" +
     '<div class="rt" data-a="habitOpen" data-id="' + h.id + '" role="button" tabindex="0"><div class="ti">' + esc(h.name) + '</div><div class="me">' +
-    (st.cur ? "🔥 " + st.cur + " day" + (st.cur > 1 ? "s" : "") : "Start today") + (times.length ? " · 🔔 " + esc(times.join(", ")) : "") +
+    (st.cur ? "🔥 " + st.cur + " day" + (st.cur > 1 ? "s" : "") : "Start today") + (times.length ? " · " + esc(times.join(", ")) : "") +
     (h.tag && !m.noTag ? ' · <span class="tag">#' + esc(h.tag) + "</span>" : "") + "</div></div>" +
     (n > 0 && freq > 1 ? '<button class="minus" data-a="habitMinus" data-id="' + h.id + '" aria-label="Undo one">−</button>' : "") + "</div>";
 };
@@ -453,7 +486,7 @@ function vToday() {
   let h = '<div class="dayleft"><span id="dayLab">' + esc(dl.label) + '</span><div class="bar"><i id="dayFill" style="width:' + dl.pct + '%"></i></div></div>' + quickAdd("Add anything… try “call mom tomorrow 5pm”");
   if (q.picks.length) {
     const st = q.picks.map(questState), n = st.filter((s) => s.ok).length;
-    h += '<div class="card quests"><h3>🎯 Today’s quests <span>' + n + "/" + q.picks.length + " · +15 XP each</span></h3>" +
+    h += '<div class="card quests"><h3>🎯 Today’s quests <span>' + n + "/" + q.picks.length + ' · +15 XP each</span><button class="qshuf" data-a="questShuffle" aria-label="Swap the unfinished quests for different ones">↻</button></h3>' +
       q.picks.map((p, i) => '<div class="quest' + (st[i].ok ? " ok" : "") + '"><button class="qd" data-a="questTick" data-i="' + i + '" aria-pressed="' + st[i].ok + '"' + (st[i].gone ? " disabled" : "") + ' aria-label="' + (st[i].gone ? "Done and since deleted: " : st[i].ok ? "Mark not done: " : "Mark done: ") + esc(st[i].title) + '">' + (st[i].ok ? "✓" : "") +
       '</button><span class="qt" data-a="questOpen" data-i="' + i + '" role="button" tabindex="0">' + esc(st[i].title) + "</span></div>").join("") + "</div>";
   }
@@ -472,6 +505,8 @@ function vToday() {
     h += '<div class="sec">Done today <span class="n">' + done.length + " · +" + xp + ' XP</span><button data-a="toggleDone">' + (ui.showDone ? "Hide" : "Show") + "</button></div>";
     if (ui.showDone) h += '<div class="card list">' + done.map((l) => '<div class="row done"><span class="chk" aria-pressed="true"></span><div class="rt"><div class="ti">' + esc(l.title) + '</div><div class="me">' + fmtTime(l.at, o) + " · +" + (l.xp || 0) + " XP</div></div></div>").join("") + "</div>";
   }
+  const sunday = loc(Date.now(), o).getUTCDay() === 0, reviewed = !!db.recs["wr-" + weekStart(0)];
+  h += '<button class="btn ' + (sunday && !reviewed ? "soft" : "ghost") + ' pick" data-a="review">📋 ' + (sunday && !reviewed ? "It’s Sunday. Do your weekly review" : "Weekly review") + "</button>";
   return h;
 }
 
@@ -489,7 +524,9 @@ function vTasks() {
   if (lid && db.recs[lid]) h += '<div class="sec">' + esc(db.recs[lid].name) + '<button data-a="listEdit" data-id="' + lid + '">Edit list</button></div>';
   const nowTs = Date.now(), gone = (i) => i.kind === "event" && !i.rep && i.at != null && (i.allDay ? i.at + DAY : i.at + (i.dur || 60) * MIN) < nowTs;
   const eff = (i) => (i.kind === "event" && i.rep ? occFrom(i, o, start) : i.at);
-  let arr = its.filter((i) => (f === "done" ? i.done || gone(i) : !i.done && !gone(i))).filter((i) =>
+  const gone0 = gone;
+  const over = (i) => gone0(i) || (i.kind === "event" && !!i.rep && i.at != null && eff(i) == null);
+  let arr = its.filter((i) => (f === "done" ? i.done || over(i) : !i.done && !over(i))).filter((i) =>
     f === "shelf" ? onShelf(i) : f === "inbox" ? !listOf(i) && !i.shelf : f === "week" ? eff(i) != null && eff(i) < start + 7 * DAY : f === "quick" ? i.kind === "task" && (i.energy === "low" || (i.est && i.est <= 15)) :
     lid ? i.list === lid : tag ? (i.tags || []).includes(tag) : true);
   if (q) arr = arr.filter((i) => (i.title + " " + (i.notes || "") + " " + (i.tags || []).join(" ")).toLowerCase().includes(q));
@@ -759,14 +796,25 @@ function dial() {
     '<div class="readout"><span class="tleft" id="clock">' + (fo.sw ? mmss(Math.floor(swElapsed() / 1000) * 1000) : mmss(left)) + '</span><span class="hint">' + (fo.sw ? (fo.start ? "stopwatch · counting up" : "stopwatch · paused") : fo.end ? "left · ends " + fmtTime(fo.end, O()) : "paused") +
     '</span><span class="hint">' + (fo.sw ? "Runs until you finish it." : fo.starter ? "You can stop when it ends." : "Full dial is 60 minutes.") + "</span></div></div>";
 }
+// The suggested lengths are yours to change: "Edit" lets you remove any of them or add your own.
+const PRESET_DEF = { timers: [10, 25, 45], guesses: [5, 15, 30, 60, 120] };
+const presets = (k) => (Array.isArray(set()[k]) ? set()[k] : PRESET_DEF[k]);
+function presetRow(k, label, pick, inputId, goAction, goLabel) {
+  const edit = ui.pe === k;
+  return '<div class="commit"><span>' + label + "</span>" + presets(k).map((n) => edit
+    ? '<button class="chip del" data-a="peDel" data-k="' + k + '" data-v="' + n + '" aria-label="Remove ' + dur(n) + '">' + dur(n) + " ×</button>"
+    : '<button class="chip" data-a="' + pick + '" data-v="' + n + '">' + dur(n) + "</button>").join("") +
+    '<input class="in mini" id="' + inputId + '" type="number" min="1" max="600" inputmode="numeric" placeholder="min" aria-label="' + (edit ? "A length to add, in minutes" : "Your own length in minutes") + '">' +
+    (edit ? '<button class="chip" data-a="peAdd" data-k="' + k + '" data-i="' + inputId + '">Add</button><button class="link" data-a="peEdit" data-k="' + k + '">Done</button>'
+      : '<button class="chip" data-a="' + goAction + '">' + goLabel + '</button><button class="link" data-a="peEdit" data-k="' + k + '">Edit</button>') + "</div>";
+}
 function timerBox(hasStep) {
   const step = hasStep ? '<button class="btn" data-a="nwStepDone">Step done</button>' : "";
   if (running()) return dial() + '<div class="acts">' + step + '<button class="btn ghost" data-a="foPause">' + (ticking() ? "Pause" : "Resume") + '</button><button class="btn ghost" data-a="foStop">' + (fo.sw ? "Finish" : "Finish early") + '</button><button class="btn ghost" data-a="foReset">Reset</button></div>';
   if (fo && fo.ended) return '<p class="ended">' + (fo.starter ? "2 minutes done. Starting was the hard part." : dur(fo.min) + " done.") + '</p><div class="acts"><button class="btn" data-a="foStart" data-v="10">Keep going 10 min</button><button class="btn ghost" data-a="foStart" data-v="25">25 min</button>' +
     (hasStep ? '<button class="btn ghost" data-a="nwStepDone">Step done</button>' : '<button class="btn ghost" data-a="foClear">Enough for now</button>') + "</div>";
-  const last = +lsGet("onward.custom") || 0;
-  return '<button class="btn big" data-a="foStart" data-v="2" data-s="1">Start with 2 minutes</button><div class="commit"><span>Or commit to</span>' + [10, 25, 45].concat(last && ![2, 10, 25, 45].includes(last) ? [last] : []).map((n) => '<button class="chip" data-a="foStart" data-v="' + n + '">' + n + " min</button>").join("") + "</div>" +
-    '<div class="commit"><span>Custom</span><input class="in mini" id="foCustom" type="number" min="1" max="600" inputmode="numeric" placeholder="min" aria-label="Custom timer length in minutes"><button class="chip" data-a="foCustom">Start</button><button class="chip" data-a="foStart" data-v="sw">⏱ Stopwatch</button></div>' +
+  return '<button class="btn big" data-a="foStart" data-v="2" data-s="1">Start with 2 minutes</button>' + presetRow("timers", "Or commit to", "foStart", "foCustom", "foCustom", "Start") +
+    '<div class="commit"><button class="chip" data-a="foStart" data-v="sw">⏱ Stopwatch</button></div>' +
     (hasStep ? '<div class="acts"><button class="btn ghost" data-a="nwStepDone">Step done</button></div>' : "");
 }
 function panelHtml() {
@@ -826,7 +874,7 @@ function vFocus() {
       h += np.panel ? panelHtml() : timerBox(true) + '<div class="links"><button class="link" data-a="nwShrink">Make it smaller</button><button class="link" data-a="nwStuck">I’m stuck</button><button class="link" data-a="aiSteps">✨ Suggest steps</button>' + park + '<button class="link" data-a="nwEdit">Edit task</button></div>';
     }
     h += it.est ? '<p class="guess"><span>Your guess: ' + dur(it.est) + " · tracked so far: " + dur((it.spent || 0) / 60) + '</span><button class="link" data-a="nwGuess" data-v="0">Change</button></p>'
-      : '<div class="guess"><span>Guess the whole task:</span>' + [[5, "5 min"], [15, "15 min"], [30, "30 min"], [60, "1 h"], [120, "2 h"]].map((g) => '<button class="chip" data-a="nwGuess" data-v="' + g[0] + '">' + g[1] + "</button>").join("") + "</div>";
+      : '<div class="guess">' + presetRow("guesses", "Guess the whole task:", "nwGuess", "nwGuessN", "nwGuessC", "Set") + "</div>";
     if (n) h += '<details class="allsteps" id="allSteps"' + (ui.stepsOpen ? " open" : "") + "><summary>All steps (" + n + ")</summary><ol>" + subs.map((x) => '<li class="' + (x.d ? "d" : x === st ? "c" : "") + '">' + esc(x.t) + "</li>").join("") +
       '</ol><div class="inl"><input class="in" id="nwAdd" type="text" autocomplete="off" placeholder="Add a later step" aria-label="Add a later step"><button class="btn ghost" data-a="nwAdd">Add</button></div></details>';
     h += "</div>";
@@ -971,8 +1019,18 @@ function editItem(id, preset) {
   const it = ex ? JSON.parse(JSON.stringify(ex)) : newItem({ withRem: true, ...(preset || {}) });
   const r = it.rep, wd5 = r && r.f === "w" && r.days && r.days.length === 5 && [1, 2, 3, 4, 5].every((x) => r.days.includes(x));
   ed = { it, isNew: !ex, dk: it.at != null ? dayKey(it.at, o) : "", tm: it.at != null && !it.allDay ? hhmm(it.at) : "",
-    rs: !r ? "" : wd5 ? "wd" : (r.n || 1) > 1 ? "c" : r.f, cn: r ? r.n || 1 : 2, cu: r ? r.f : "d", days: r && r.days && !wd5 ? r.days.slice() : [] };
+    rs: !r ? "" : wd5 ? "wd" : (r.n || 1) > 1 ? "c" : r.f, cn: r ? r.n || 1 : 2, cu: r ? r.f : "d", days: r && r.days && !wd5 ? r.days.slice() : [], until: r && r.until ? r.until : "" };
   openSheet(ex ? "Edit" : "New", edBody(), saveEd, "Save");
+}
+// The occurrence "Skip this one" would skip: a task's current date, or an event's next one.
+function skipTarget(it) {
+  if (!it.rep || it.at == null || it.done) return null;
+  return it.kind === "event" ? occFrom(it, O(), Date.now()) : it.at;
+}
+function skipBtn() {
+  if (ed.isNew) return "";
+  const cur = db.recs[ed.it.id], at = cur ? skipTarget(cur) : null;
+  return at == null ? "" : '<button class="btn ghost sm" style="margin-top:10px" data-a="edSkip">Skip just this one (' + esc(fmtDay(at, O(), Date.now())) + ")</button>";
 }
 const edSugHtml = () => [...new Set([...(ed.ai || []), ...suggestIcons(ed.it.title)])].filter((e) => e !== ed.it.icon).slice(0, 6).map((e) => '<button class="emo" data-a="edIcon" data-v="' + e + '" aria-label="Use ' + e + '">' + e + "</button>").join("");
 function remRow(r, i) {
@@ -1000,13 +1058,17 @@ function edBody() {
     (ed.dk && !ed.tm ? '<p class="hint" style="margin-top:6px">No time set, so this is all day. Reminders count from ' + esc(set().alldayAt) + ".</p>" : "") + "</div>" +
     '<div class="f"><label>Repeat</label><select class="in" data-f="rs" data-c="redraw" aria-label="Repeat">' + opts([["", "Doesn’t repeat"], ["d", "Daily"], ["wd", "Weekdays (Mon to Fri)"], ["w", "Weekly"], ["m", "Monthly"], ["y", "Yearly"], ["c", "Custom…"]], ed.rs) + "</select>" +
     (ed.rs === "c" ? '<div class="r2" style="margin-top:8px"><input class="in" type="number" min="1" inputmode="numeric" data-f="cn" value="' + ed.cn + '" aria-label="Every how many"><select class="in" data-f="cu" data-c="redraw" aria-label="Unit">' + opts([["d", "days"], ["w", "weeks"], ["m", "months"], ["y", "years"]], ed.cu) + "</select></div>" : "") +
-    (wk ? '<div class="chips" style="margin-top:8px">' + WD.map((d, i) => chipBtn("edWd", i, d, ed.days.includes(i))).join("") + "</div>" : "") + "</div>" +
+    (wk ? '<div class="chips" style="margin-top:8px">' + WD.map((d, i) => chipBtn("edWd", i, d, ed.days.includes(i))).join("") + "</div>" : "") +
+    (ed.rs ? '<div class="r2" style="margin-top:8px;align-items:center"><span class="hint" style="flex:none">Ends on</span><input class="in" type="date" data-f="until" value="' + esc(ed.until) + '" aria-label="Repeat ends on, empty for never"></div><p class="hint" style="margin-top:6px">Leave the end date empty to repeat forever.</p>' : "") +
+    skipBtn() + "</div>" +
     '<div class="f"><label>Reminders</label>' + it.rem.map(remRow).join("") + '<button class="btn soft sm" data-a="remAdd">+ Add reminder</button>' +
     (it.rem.some((r) => r.at == null) && !ed.dk ? '<p class="hint" style="margin-top:6px">Pick a date above, or these reminders have nothing to count from.</p>' : "") +
     warn([...new Set(it.rem.flatMap((r) => r.ch))]) + "</div>" +
     (ev ? "" : '<div class="f"><label>If I ignore it</label><select class="in" data-f="nag" aria-label="Keep nudging">' + opts([[0, "Remind once"], [5, "Nudge every 5 min until done (up to 5 times)"], [10, "Nudge every 10 min until done (up to 5 times)"], [30, "Nudge every 30 min until done (up to 5 times)"]], it.nag || 0) + "</select></div>") +
-    '<div class="f r2"><div><span class="lab">List</span><select class="in" data-f="list" aria-label="List">' + opts([["", "Inbox"]].concat(lists().map((l) => [l.id, l.name])), it.list) + "</select></div>" +
-    '<div><span class="lab">Takes about</span><select class="in" data-f="est" aria-label="Estimate">' + opts([[0, "Not sure"], [5, "5 min"], [15, "15 min"], [30, "30 min"], [60, "1 hour"], [120, "2 hours"], [240, "Half a day"]], it.est || 0) + "</select></div></div>" +
+    '<div class="f r2"><div><span class="lab">List</span><select class="in" data-f="list" data-c="edList" aria-label="List">' + opts([["", "Inbox"]].concat(lists().map((l) => [l.id, l.name]), [["__new", "+ New list…"]]), ed.newList ? "__new" : it.list) + "</select></div>" +
+    '<div><span class="lab">Takes about</span><select class="in" data-f="est" data-c="edEst" aria-label="Estimate">' + opts([[0, "Not sure"]].concat([...new Set([...presets("guesses"), ...(it.est ? [it.est] : [])])].sort((a, b) => a - b).map((n) => [n, dur(n)]), [["c", "Custom…"]]), ed.estC ? "c" : it.est || 0) + "</select>" +
+    (ed.estC ? '<input class="in" style="margin-top:8px" type="number" min="1" max="6000" inputmode="numeric" data-f="estN" id="edEstN" placeholder="Minutes" value="' + (it.est || "") + '" aria-label="Your own estimate in minutes">' : "") + "</div></div>" +
+    (ed.newList ? '<div class="r2" style="margin-top:8px"><input class="in" id="edNewList" type="text" autocomplete="off" placeholder="Name of the new list" aria-label="Name of the new list"><button class="btn" style="flex:none" data-a="edListAdd">Create</button></div>' : "") +
     (ev ? "" : '<div class="f"><label>Priority</label><div class="chips">' + ["None", "Low", "Medium", "High"].map((l, i) => chipBtn("edPri", i, l, (it.pri || 0) === i)).join("") + "</div></div>" +
       '<div class="f"><label>Energy it needs</label><div class="chips">' + [["", "Not set"], ["low", "Low"], ["med", "Medium"], ["high", "High"]].map(([v, l]) => chipBtn("edEn", v, l, (it.energy || "") === v)).join("") + "</div></div>") +
     '<div class="f"><label>Tags</label><input class="in" data-f="tags" placeholder="home, study" value="' + esc((it.tags || []).join(", ")) + '" aria-label="Tags, separated by commas"></div>' +
@@ -1023,12 +1085,16 @@ function readForm() {
   const it = ed.it, o = O();
   for (const el of $$("#sheet [data-f]")) {
     const f = el.dataset.f, v = el.value, i = +el.dataset.i;
-    if (f === "title" || f === "step" || f === "notes" || f === "list") it[f] = v;
+    if (f === "list") { if (v !== "__new") it.list = v; }
+    else if (f === "title" || f === "step" || f === "notes") it[f] = v;
     else if (f === "icon") it.icon = firstGrapheme(v);
     else if (f === "left") it.left = v;
+    else if (f === "until") ed.until = v;
     else if (f === "dk" || f === "tm" || f === "rs" || f === "cu") ed[f] = v;
     else if (f === "cn") ed.cn = Math.max(1, Math.floor(+v) || 1);
-    else if (f === "dur" || f === "nag" || f === "est") it[f] = +v;
+    else if (f === "dur" || f === "nag") it[f] = +v;
+    else if (f === "est") { if (v !== "c") it.est = +v; }
+    else if (f === "estN") { const n = Math.floor(+v); if (n >= 1) it.est = Math.min(6000, n); }
     else if (f === "tags") it.tags = [...new Set(v.split(/[,\s]+/).map((x) => x.replace(/^#/, "").trim().toLowerCase()).filter(Boolean))];
     else if (f === "sub" && it.subs[i]) it.subs[i].t = v;
     else if (f === "remN" && it.rem[i]) it.rem[i]._n = Math.max(1, Math.floor(+v) || 1);
@@ -1060,6 +1126,7 @@ function saveEd() {
     else if (f === "w" && e.days.length) rep.days = e.days.slice().sort();
     if (f === "m") rep.dom = loc(it.at, o).getUTCDate();
     if (rep.days) for (let g = 0; g < 7 && !rep.days.includes(loc(it.at, o).getUTCDay()); g++) it.at += DAY;
+    if (e.until && e.until >= dayKey(it.at, o)) rep.until = e.until;
     it.rep = rep;
   }
   put(it);
@@ -1183,12 +1250,17 @@ function settingsBody() {
     '<span class="lab" style="margin-top:12px">Through</span>' + chRow("sDefCh", s.defCh) +
     '<span class="lab" style="margin-top:12px">All-day items count from</span><input class="in" type="time" data-s="alldayAt" value="' + esc(s.alldayAt) + '">' +
     '<span class="lab" style="margin-top:12px">Morning plan at</span><input class="in" type="time" data-s="digestAt" value="' + esc(s.digestAt || "") + '"><div style="height:8px"></div>' + chRow("sDigCh", s.digestCh) +
-    '<p class="hint" style="margin-top:6px">One message a day with what is planned and what carried over. Clear the time to turn it off.</p></details>' +
+    '<p class="hint" style="margin-top:6px">One message a day with what is planned and what carried over. Clear the time to turn it off.</p>' +
+    '<span class="lab" style="margin-top:12px">Quiet hours</span><div class="r2"><div><span class="hint">From</span><input class="in" type="time" data-s="quietFrom" value="' + esc(s.quietFrom || "") + '" aria-label="Quiet hours start"></div><div><span class="hint">To</span><input class="in" type="time" data-s="quietTo" value="' + esc(s.quietTo || "") + '" aria-label="Quiet hours end"></div></div>' +
+    '<p class="hint" style="margin-top:6px">Reminders due in this window wait and arrive when it ends. Anything set as an Alarm still comes through. Clear both times to turn it off.</p></details>' +
 
     '<details class="card grp"><summary>My day and the timer</summary><div class="r2"><div><span class="lab">Day starts</span><input class="in" type="time" data-s="dayStart" value="' + esc(s.dayStart) + '"></div><div><span class="lab">Day ends</span><input class="in" type="time" data-s="dayEnd" value="' + esc(s.dayEnd) + '"></div></div>' +
     '<p class="hint" style="margin-top:6px">Sets the “left today” bar on the Today tab.</p><span class="lab" style="margin-top:12px">Chime while a timer runs</span><select class="in" data-s="chime">' + opts([[0, "Off"], [5, "Every 5 min"], [10, "Every 10 min"], [15, "Every 15 min"]], s.chime) + "</select></details>" +
 
     '<details class="card grp"><summary>Look and sound</summary><span class="lab">Theme</span><select class="in" data-s="theme">' + opts([["auto", "Match my device"], ["light", "Light"], ["dark", "Dark"]], s.theme) + "</select>" +
+    '<span class="lab" style="margin-top:12px">Accent colour</span><div class="accents">' + ACCENTS.map((a) => { const open = topLevel() >= a[2], on = (s.accent || "teal") === a[0];
+      return '<button class="acc" data-a="accent" data-v="' + a[0] + '"' + (open ? "" : " disabled") + ' aria-pressed="' + on + '" aria-label="' + a[1] + (open ? "" : ", unlocks at level " + a[2]) + '"><i style="background:' + a[3] + '"></i><span>' + a[1] + "</span><em>" + (open ? (on ? "In use" : "Unlocked") : "🔒 Level " + a[2]) + "</em></button>"; }).join("") + "</div>" +
+    '<p class="hint" style="margin-top:6px">You are level ' + game().L + ". New colours unlock as you level up.</p>" +
     '<span class="lab" style="margin-top:12px">Sounds</span><select class="in" data-s="sound">' + opts([["1", "On"], ["", "Off"]], s.sound ? "1" : "") + "</select></details>" +
 
     '<details class="card grp"><summary>Bring in my Tally counter data</summary>' +
@@ -1224,6 +1296,44 @@ async function pushOn() {
     sMsg("mPush", "On. Tap “🔔 Push” below to send yourself a test.", "ok");
   } catch (e) { sMsg("mPush", "Could not turn on: " + e.message, "bad"); }
 }
+// ---------- weekly review ----------
+const weekStart = (back) => addDays(today(), -new Date(today() + "T00:00:00Z").getUTCDay() - 7 * back);
+let rvBack = 0;
+function reviewBody() {
+  const o = O(), t = today(), now = Date.now(), ws = weekStart(rvBack), from = keyTs(ws, o), to = from + 7 * DAY;
+  const L = logs().filter((l) => l.at >= from && l.at < to), tasks = L.filter((l) => l.k === "task"), hab = L.filter((l) => l.k === "habit"), mins = L.filter((l) => l.k === "focus").reduce((a, l) => a + (l.min || 0), 0), xp = L.reduce((a, l) => a + (l.xp || 0), 0);
+  const chip = (v, l) => '<button class="chip" data-a="rvWeek" data-v="' + v + '" aria-pressed="' + (rvBack === v) + '">' + l + "</button>";
+  let h = '<div class="chips">' + chip(0, "This week") + chip(1, "Last week") + '</div><p class="hint" style="margin-top:8px">' + fmtDay(from, o, now) + " to " + fmtDay(to - DAY, o, now) + "</p>";
+  h += '<div class="stats" style="grid-template-columns:repeat(2,1fr)">' + [[tasks.length, "Tasks done"], [hab.length, "Habit check-offs"], [dur(mins), "Focused"], ["+" + xp, "XP earned"]].map((x) => '<div class="card stat"><b>' + x[0] + "</b><span>" + x[1] + "</span></div>").join("") + "</div>";
+  // tasks done per day: one series, one colour
+  const per = Array.from({ length: 7 }, (_, i) => tasks.filter((l) => dayKey(l.at, o) === addDays(ws, i)).length), mx = Math.max(...per, 1);
+  h += '<div class="card vz"><div class="wkbars">' + per.map((n, i) => '<div class="wkb" title="' + WD[i] + ": " + n + '"><em>' + (n || "") + '</em><i style="height:' + Math.round((60 * n) / mx) + 'px"></i><span>' + WD[i][0] + "</span></div>").join("") + '</div><p class="hint">Tasks finished each day.</p></div>';
+  h += '<div class="sec">Wins</div>';
+  if (!tasks.length) h += '<p class="hint">' + (rvBack ? "No tasks were ticked off that week." : "Nothing ticked off yet this week. One small thing still counts.") + "</p>";
+  else h += '<div class="card list">' + tasks.slice().sort((a, b) => b.at - a.at).slice(0, 12).map((l) => '<div class="hrow"><div class="rt"><div class="ti">' + esc(l.title) + '</div><div class="me">' + fmtDay(l.at, o, now) + "</div></div></div>").join("") + "</div>" + (tasks.length > 12 ? '<p class="hint" style="margin-top:6px">and ' + (tasks.length - 12) + " more.</p>" : "");
+  const hs = habits();
+  if (hs.length) {
+    const days = Math.min(7, Math.max(1, Math.floor((Math.min(now, to - 1) - from) / DAY) + 1));
+    h += '<div class="sec">Habits</div><div class="card vz">' + hs.map((x) => { let n = 0; for (let i = 0; i < 7; i++) if (habitDone(x, addDays(ws, i))) n++;
+      return '<div class="vrow"><span>' + esc((x.icon ? x.icon + " " : "") + x.name) + '</span><i><b style="width:' + Math.round((100 * n) / days) + '%"></b></i><em>' + n + "/" + days + " days</em></div>"; }).join("") + "</div>";
+  }
+  const hist = all("hist").filter((x) => x.at >= from && x.at < to);
+  if (hist.length) { let e = 0, a = 0; for (const x of hist) { e += x.est; a += x.actual; }
+    h += '<div class="sec">Guess vs. tracked</div><p>Across ' + hist.length + (hist.length === 1 ? " task" : " tasks") + " this week, things took <b>" + (a / e).toFixed(1) + "×</b> your guess (" + dur(e) + " guessed, " + dur(a) + " tracked).</p>"; }
+  if (!rvBack) {
+    const late = items().filter((i) => i.kind === "task" && !i.done && i.at != null && i.at < startToday());
+    if (late.length) h += '<div class="sec">Carried over</div><p>' + late.length + (late.length === 1 ? " task is" : " tasks are") + ' waiting from earlier days.</p><button class="btn ghost sm" style="margin-top:8px" data-a="rvLate">Move all to today</button>';
+    const shelf = items().filter(onShelf).sort((a, b) => (a.shelfAt || 0) - (b.shelfAt || 0));
+    h += '<div class="sec">Meaning to <span class="n">' + shelf.length + "</span></div>";
+    if (!shelf.length) h += '<p class="hint">The shelf is empty.</p>';
+    else h += '<div class="card list">' + shelf.map((i) => '<div class="hrow" style="flex-wrap:wrap"><div class="rt"><div class="ti">' + esc(i.title) + '</div><div class="me">' + waited(i) + '</div></div><div class="chips">' +
+      [["today", "Today"], ["keep", "Keep"], ["drop", "Drop"]].map(([v, l]) => '<button class="chip" data-a="rvShelf" data-id="' + i.id + '" data-v="' + v + '">' + l + "</button>").join("") + "</div></div>").join("") + "</div>";
+    const did = !!db.recs["wr-" + ws];
+    h += '<div class="f"><button class="btn" style="width:100%" data-a="rvDone"' + (did ? " disabled" : "") + ">" + (did ? "Reviewed this week ✓" : "Finish review (+20 XP)") + "</button></div>";
+  }
+  return h;
+}
+
 // ---------- focus history and charts ----------
 const focusName = (l) => { const r = db.recs[l.ref]; return r ? (r.icon ? r.icon + " " : "") + (r.title || r.name) : l.ref ? String(l.title || "").replace(/^Focused \d+ min:? ?/, "") || "Removed item" : "No specific task"; };
 const focusTags = (l) => { const r = db.recs[l.ref]; return !r ? [] : r.type === "habit" ? (r.tag ? [tagKey(r.tag)] : []) : (r.tags || []).map(tagKey); };
@@ -1380,7 +1490,10 @@ function celebrate(xp, el, levelBefore, big = true) {
   const g = game();
   if (g.L > levelBefore) setTimeout(() => {
     confetti({ isConnected: true, getBoundingClientRect: () => ({ left: p.x, top: p.y, width: 1, height: 1 }) }, 60); beep([523, 659, 784, 1047]);
-    if ($("#sheet").hidden) openSheet("Level up", '<div class="lvup"><div class="big">🏆</div><h2 style="font-size:26px;margin:6px 0">Level ' + g.L + '</h2><p class="hint">You are now “' + TITLES[Math.min(g.L, TITLES.length) - 1] + "”. Small steps got you here.</p></div>", null, "Nice");
+    const won = ACCENTS.filter((a) => a[2] > levelBefore && a[2] <= g.L && a[2] > (set().maxL || 1)).map((a) => a[1]);
+    if (g.L > (set().maxL || 1)) put({ ...set(), maxL: g.L });
+    if ($("#sheet").hidden) openSheet("Level up", '<div class="lvup"><div class="big">🏆</div><h2 style="font-size:26px;margin:6px 0">Level ' + g.L + '</h2><p class="hint">You are now “' + TITLES[Math.min(g.L, TITLES.length) - 1] + "”. Small steps got you here.</p>" +
+      (won.length ? '<p style="margin-top:10px;font-weight:650">🎨 New accent colour unlocked: ' + won.join(", ") + '</p><p class="hint">Pick it in Settings > Look and sound.</p>' : "") + "</div>", null, "Nice");
     else toast("Level up! You reached level " + g.L + " 🏆");
   }, 350);
 }
@@ -1441,6 +1554,11 @@ const A = {
   },
   pick() { if (pickNow()) setTab("focus", "fwd"); },
   questOpen(el) { const p = quest().picks[+el.dataset.i], r = p && db.recs[p.ref]; if (!r || r.del) return; if (p.t === "habit") { tickHabit(r.id, 1, el); done(); } else editItem(r.id); },
+  questShuffle() {
+    const q = quest(), was = JSON.stringify(q.picks);
+    put({ ...q, rot: (q.rot || 0) + 1 });
+    toast(JSON.stringify(quest().picks) === was ? "Nothing else to swap in right now." : "Swapped the unfinished quests."); done();
+  },
   questTick(el) {
     const p = quest().picks[+el.dataset.i], r = p && db.recs[p.ref];
     if (!r || r.del) return;
@@ -1541,7 +1659,7 @@ const A = {
   foCustom() {
     const n = Math.floor(+$("#foCustom").value);
     if (!(n >= 1 && n <= 600)) return toast("Type a length between 1 and 600 minutes.");
-    lsSet("onward.custom", String(n)); foStart(n); render();
+    $("#foCustom").value = ""; foStart(n); render();
   },
   foPause() {
     if (fo.sw) { if (fo.start) { fo.acc = swElapsed(); fo.start = 0; wakeOff(); } else { fo.start = Date.now(); wakeOn(); } }
@@ -1589,6 +1707,19 @@ const A = {
   nwReason(el) { const r = STUCK[el.dataset.v]; if (r.go) { r.go(); render(); const e = $("#nwShrink"); if (e) e.focus(); } else { np.stuck = el.dataset.v; render(); } },
   nwTactic() { const r = STUCK[np.stuck]; np.panel = ""; np.stuck = ""; r.act(); render(); },
   nwGuess(el) { const it = nowTask(); if (it) put({ ...it, est: +el.dataset.v }); render(); },
+  nwGuessC() {
+    const el = $("#nwGuessN"), n = Math.floor(+el.value), it = nowTask();
+    if (!(n >= 1 && n <= 6000)) return toast("Type your guess in minutes.");
+    el.value = ""; if (it) put({ ...it, est: n }); render();
+  },
+  peEdit(el) { ui.pe = ui.pe === el.dataset.k ? "" : el.dataset.k; render(); },
+  peDel(el) { const k = el.dataset.k; put({ ...set(), [k]: presets(k).filter((n) => n !== +el.dataset.v) }); render(); },
+  peAdd(el) {
+    const k = el.dataset.k, inp = document.getElementById(el.dataset.i), n = Math.floor(+inp.value);
+    if (!(n >= 1 && n <= 600)) return toast("Type a length between 1 and 600 minutes.");
+    inp.value = ""; put({ ...set(), [k]: [...new Set([...presets(k), n])].sort((a, b) => a - b) }); render();
+    const again = document.getElementById(el.dataset.i); if (again) again.focus();
+  },
   async aiSteps() { await nowAi("steps"); },
   async aiSmaller() { await nowAi("smaller"); },
   aiToggle(el) { const x = np.ai.steps[+el.dataset.i]; x.on = !x.on; render(); },
@@ -1630,6 +1761,22 @@ const A = {
     try { const r = await aiAsk({ kind: "icons", what: "habit", title: hd.name }); if (!hd || hd.id !== id) return; readHd(); hd._ai = r.icons; setBody(hdBody()); }
     catch (e) { if (hd && $("#hdSug")) $("#hdSug").innerHTML = '<span class="hint">' + esc(e.message) + "</span>"; }
   },
+  review() { rvBack = 0; openSheet("Weekly review", reviewBody(), null, "Close"); },
+  rvWeek(el) { rvBack = +el.dataset.v; setBody(reviewBody()); },
+  rvLate() { A.lateToday(); setBody(reviewBody()); },
+  rvShelf(el) {
+    const it = db.recs[el.dataset.id], v = el.dataset.v;
+    if (v === "today") put({ ...it, shelf: 0, at: startToday(), allDay: true });
+    else if (v === "keep") { put({ ...it, askAt: Date.now() }); toast("Kept on the shelf."); }
+    else { del(it.id); toast("Let go. That was a decision, not a failure.", () => { put({ ...it, del: 0 }); if ($("#sheet .shb")) setBody(reviewBody()); }); }
+    setBody(reviewBody());
+  },
+  rvDone(el) {
+    const id = "wr-" + weekStart(0), before = game().L;
+    if (db.recs[id]) return;
+    put({ id, type: "log", k: "bonus", title: "Weekly review", at: Date.now(), xp: 20 });
+    celebrate(20, el, before); closeSheet(true); toast("Review done. +20 XP");
+  },
   foLog() { openSheet("Focus sessions", foLogBody(), null, "Close"); },
   foLogDel(el) { del(el.dataset.id); setBody(foLogBody()); },
   foViz() { openSheet("Minutes focused", foVizBody(), null, "Close"); },
@@ -1639,7 +1786,7 @@ const A = {
   xpReset(el) {
     if (!el.dataset.armed) { el.dataset.armed = "1"; el.textContent = "Tap again to go back to level 1"; return; }
     const s = set(), prev = s.xpOff || 0, total = logs().reduce((a, l) => a + (l.xp || 0), 0);
-    put({ ...s, xpOff: total }); closeSheet(true);
+    put({ ...s, xpOff: total, maxL: topLevel() }); closeSheet(true); // colours already unlocked stay unlocked
     toast("Level and XP reset. Your streak and history are kept.", () => put({ ...set(), xpOff: prev }));
   },
   dump() { openSheet("Brain dump", '<p class="hint" style="margin-bottom:8px">Write down whatever is taking up space in your head. Sorting comes later. Everything lands in your Inbox.</p>' + dumpForm(), null, "Close"); const e = $("#dumpText"); if (e) e.focus(); },
@@ -1653,6 +1800,29 @@ const A = {
   // editor
   edKind(el) { readForm(); ed.it.kind = el.dataset.v; setBody(edBody()); },
   edDk(el) { readForm(); ed.dk = el.dataset.v; ed.it.shelf = 0; if (!ed.dk) ed.tm = ""; setBody(edBody()); },
+  edSkip() {
+    const id = ed.it.id, o = O(), now = Date.now();
+    closeSheet(); // keeps any edits made so far
+    const it = db.recs[id], at = it ? skipTarget(it) : null;
+    if (at == null) return;
+    let next;
+    if (it.kind === "event") { put({ ...it, skip: [...(it.skip || []), dayKey(at, o)] }); next = occFrom(db.recs[id], o, now); }
+    else {
+      next = step(at, it.rep, o);
+      for (let g = 0; repSkipped(it, next, o) && g < 400; g++) next = step(next, it.rep, o);
+      if (repOver(it, next, o)) { put({ ...it, done: now }); next = null; } else put({ ...it, at: next, subs: (it.subs || []).map((x) => ({ ...x, d: 0 })) });
+    }
+    toast("Skipped " + fmtDay(at, o, now) + (next != null ? ". Next: " + fmtDay(next, o, now) + "." : ". That was the last one."), () => put({ ...it }));
+    done();
+  },
+  edListAdd() {
+    const name = $("#edNewList").value.trim();
+    if (!name) return;
+    readForm();
+    const same = lists().find((l) => l.name.toLowerCase() === name.toLowerCase());
+    ed.it.list = same ? same.id : put({ id: uid(), type: "list", name, color: COLORS[lists().length % COLORS.length], ord: Date.now() }).id;
+    ed.newList = false; setBody(edBody());
+  },
   edShelf() { readForm(); ed.it.shelf = 1; ed.dk = ""; ed.tm = ""; ed.rs = ""; ed.it.rem = []; setBody(edBody()); },
   shToday(el) { const it = db.recs[el.dataset.id]; put({ ...it, shelf: 0, at: startToday(), allDay: true }); shelfAnswered(); toast("On today’s list. One small step is enough."); done(); },
   shNo(el) { put({ ...db.recs[el.dataset.id], offAt: today() }); shelfAnswered(); toast("No problem. It will wait."); render(); },
@@ -1699,6 +1869,7 @@ const A = {
       cfg = await api("/api/config"); setBody(settingsBody());
     } catch (e) { setDot("err"); sMsg("mKey", e.status === 401 ? "That key was not accepted." : e.message, "bad"); }
   },
+  accent(el) { put({ ...set(), accent: el.dataset.v }); applyTheme(); setBody(settingsBody()); render(); },
   pushOn: () => pushOn().then(loadCfg),
   async cfgRefresh() { await sync(); await loadCfg(); if ($("#sKey")) setBody(settingsBody()); },
   async syncNow() { sMsg("mKey", "Syncing…"); await sync(); sMsg("mKey", dot === "on" ? "Up to date." : "Could not reach the server.", dot === "on" ? "ok" : "bad"); },
@@ -1753,6 +1924,8 @@ const C = {
   hdColor: (el) => A.hdColor(el),
   ldColor: (el) => A.ldColor(el),
   redraw() { readForm(); setBody(edBody()); },
+  edEst(el) { readForm(); ed.estC = el.value === "c"; setBody(edBody()); const n = $("#edEstN"); if (n) n.focus(); },
+  edList(el) { readForm(); ed.newList = el.value === "__new"; setBody(edBody()); const n = $("#edNewList"); if (n) n.focus(); },
   remWhen(el) {
     readForm();
     const r = ed.it.rem[+el.dataset.i], v = el.value;
@@ -1798,7 +1971,12 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "Enter" && el.id === "subNew") { e.preventDefault(); A.subAdd(); }
   else if (e.key === "Enter" && (el.id === "hdName" || (el.dataset && el.dataset.f === "title"))) { e.preventDefault(); closeSheet(); }
   else if (e.key === "Enter" && { nwFirst: 1, nwAdd: 1, nwShrink: 1, nwPark: 1 }[el.id]) { e.preventDefault(); A[{ nwFirst: "nwFirst", nwAdd: "nwAdd", nwShrink: "nwShrinkGo", nwPark: "nwParkGo" }[el.id]](); }
-  else if (e.key === "Enter" && el.id === "foCustom") { e.preventDefault(); A.foCustom(); }
+  else if (e.key === "Enter" && el.id === "edNewList") { e.preventDefault(); A.edListAdd(); }
+  else if (e.key === "Enter" && (el.id === "foCustom" || el.id === "nwGuessN")) {
+    e.preventDefault();
+    const k = el.id === "foCustom" ? "timers" : "guesses";
+    if (ui.pe === k) A.peAdd({ dataset: { k, i: el.id } }); else A[el.id === "foCustom" ? "foCustom" : "nwGuessC"]();
+  }
   else if (e.key === "Enter" && el.id === "eName") { e.preventDefault(); A.tapSaveGo({ dataset: { v: "0" } }); }
   else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && el.classList && el.classList.contains("grip")) { e.preventDefault(); moveHabit(el.dataset.id, e.key === "ArrowUp" ? -1 : 1); }
   else if ((e.key === "Enter" || e.key === " ") && el.getAttribute && el.getAttribute("role") === "button") { e.preventDefault(); el.click(); }
@@ -1847,11 +2025,50 @@ function endDrag(e) {
 document.addEventListener("pointerup", endDrag);
 document.addEventListener("pointercancel", endDrag);
 
+// ---------- swipe a task: right to tick it off, left to move it to tomorrow ----------
+function postpone(id) {
+  const it = db.recs[id], o = O();
+  if (!it || it.done) return;
+  const tom = addDays(today(), 1), d = it.at != null ? loc(it.at, o) : null;
+  put({ ...it, shelf: 0, at: d && !it.allDay ? keyTs(tom, o, d.getUTCHours(), d.getUTCMinutes()) : keyTs(tom, o), allDay: it.at == null ? true : it.allDay });
+  toast("Moved to tomorrow.", () => put({ ...it }));
+  done();
+}
+let rsw = null;
+$("#main").addEventListener("touchstart", (e) => {
+  const row = e.target.closest(".row.task");
+  rsw = row && e.touches.length === 1 && $("#sheet").hidden ? { row, x: e.touches[0].clientX, y: e.touches[0].clientY, on: false, dx: 0 } : null;
+}, { passive: true });
+$("#main").addEventListener("touchmove", (e) => {
+  if (!rsw) return;
+  const c = e.touches[0], dx = c.clientX - rsw.x, dy = c.clientY - rsw.y;
+  if (!rsw.on) {
+    if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { rsw = null; return; } // it is a scroll
+    if (Math.abs(dx) < 14) return;
+    rsw.on = true; rsw.row.classList.add("swiping");
+  }
+  rsw.dx = dx;
+  rsw.row.style.transform = "translateX(" + dx + "px)";
+  rsw.row.dataset.sw = dx > 90 ? "done" : dx < -90 ? "later" : "";
+}, { passive: true });
+const endRowSwipe = (commit) => {
+  if (!rsw) return;
+  const { row, dx, on } = rsw;
+  rsw = null;
+  if (!on) return;
+  row.classList.remove("swiping"); row.style.transform = ""; delete row.dataset.sw;
+  if (!commit) return;
+  if (dx > 90) { toggleTask(row.dataset.id, row.querySelector(".chk")); done(); }
+  else if (dx < -90) postpone(row.dataset.id);
+};
+$("#main").addEventListener("touchend", () => endRowSwipe(true), { passive: true });
+$("#main").addEventListener("touchcancel", () => endRowSwipe(false), { passive: true });
+
 // ---------- swipe left or right to change section ----------
 let sw = null;
 $("#main").addEventListener("touchstart", (e) => {
   const t = e.target;
-  sw = e.touches.length === 1 && $("#sheet").hidden && !drag && !ui.selecting && !t.closest(".chips.scroll, input, textarea, select, .grip")
+  sw = e.touches.length === 1 && $("#sheet").hidden && !drag && !ui.selecting && !t.closest(".chips.scroll, input, textarea, select, .grip, .row.task")
     ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
 }, { passive: true });
 $("#main").addEventListener("touchend", (e) => {
@@ -1869,7 +2086,15 @@ document.addEventListener("focusin", showTip);
 document.addEventListener("click", showTip);
 
 // ================= boot =================
-function applyTheme() { const t = set().theme; if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t); }
+const topLevel = () => Math.max(game().L, set().maxL || 1); // the highest level ever reached, so a reset does not lock colours again
+function applyTheme() {
+  const s = set(), t = s.theme, root = document.documentElement;
+  if (t === "auto") root.removeAttribute("data-theme"); else root.setAttribute("data-theme", t);
+  const dark = t === "dark" || (t === "auto" && matchMedia("(prefers-color-scheme: dark)").matches), a = ACCENTS.find((x) => x[0] === s.accent);
+  if (!a || a[0] === "teal") for (const v of ["--accent", "--accent-ink", "--soft"]) root.style.removeProperty(v);
+  else { root.style.setProperty("--accent", dark ? a[4] : a[3]); root.style.setProperty("--accent-ink", dark ? "#0E1418" : "#FFFFFF"); root.style.setProperty("--soft", dark ? a[6] : a[5]); }
+}
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { applyTheme(); render(); });
 function openFromLink(id, alarm) {
   const r = db.recs[id];
   if (!r || r.del) return;
@@ -1900,5 +2125,20 @@ if ("serviceWorker" in navigator) {
 }
 sync().then(loadCfg).then(() => {
   const p = new URLSearchParams(location.search);
-  if (p.get("open")) { openFromLink(p.get("open"), p.get("alarm")); history.replaceState(null, "", "/"); }
+  if (p.get("open")) openFromLink(p.get("open"), p.get("alarm"));
+  // Long-press shortcuts on the app icon.
+  const go = p.get("do");
+  if (go === "add") editItem(null);
+  else if (go === "timer") setTab("focus");
+  else if (go === "dump") A.dump();
+  // Text or a link shared to Onward from another app becomes an Inbox task straight away.
+  const st = (p.get("title") || "").trim(), sx = (p.get("text") || "").trim(), su = (p.get("url") || "").trim();
+  if (st || sx || su) {
+    const lines = (sx || st || su).split(/\n+/).map((x) => x.trim()).filter(Boolean), link = su || ((sx.match(/https?:\/\/\S+/) || [])[0] || "");
+    const title = (st && st !== link ? st : lines[0] || link).replace(/https?:\/\/\S+/g, "").trim().slice(0, 140) || link.slice(0, 140);
+    const notes = [sx && sx !== title ? sx : "", link && !sx.includes(link) ? link : ""].filter(Boolean).join("\n");
+    const it = put(newItem({ title, notes }));
+    toast("Added to your Inbox: " + title.slice(0, 40), null); done(); editItem(it.id);
+  }
+  if (location.search) history.replaceState(null, "", "/");
 });

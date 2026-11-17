@@ -74,6 +74,9 @@ export function nextOcc(at, rep, off, after) {
   do { cur = step(cur, rep, off); } while (cur <= after && g++ < 4000);
   return cur;
 }
+// A repeat can stop on a date (rep.until, a day key) and single dates can be skipped (it.skip, day keys).
+export const repOver = (it, ts, off) => !!(it.rep && it.rep.until && dayKey(ts, off) > it.rep.until);
+export const repSkipped = (it, ts, off) => !!(it.skip && it.skip.length && it.skip.includes(dayKey(ts, off)));
 // Every occurrence start inside [from, to).
 export function occurrences(it, off, from, to) {
   if (it.at == null) return [];
@@ -81,17 +84,18 @@ export function occurrences(it, off, from, to) {
   const out = [];
   let cur = it.at, g = 0;
   while (cur < to && g++ < 4000) {
-    if (cur >= from) out.push(cur);
+    if (repOver(it, cur, off)) break;
+    if (cur >= from && !repSkipped(it, cur, off)) out.push(cur);
     cur = step(cur, it.rep, off);
   }
   return out;
 }
-// The first occurrence at or after `from` (for showing a repeating event's next date).
+// The first occurrence at or after `from`, or null when the repeat has ended before then.
 export function occFrom(it, off, from) {
   if (it.at == null || !it.rep) return it.at;
   let cur = it.at, g = 0;
-  while (cur < from && g++ < 4000) cur = step(cur, it.rep, off);
-  return cur;
+  while ((cur < from || repSkipped(it, cur, off)) && g++ < 4000) cur = step(cur, it.rep, off);
+  return repOver(it, cur, off) ? null : cur;
 }
 export function repText(rep) {
   if (!rep) return "";
@@ -103,6 +107,22 @@ export function repText(rep) {
   }
   const unit = { d: "day", w: "week", m: "month", y: "year" }[rep.f];
   return n > 1 ? "Every " + n + " " + unit + "s" : { d: "Daily", w: "Weekly", m: "Monthly", y: "Yearly" }[rep.f];
+}
+export function untilText(rep) {
+  if (!rep || !rep.until) return "";
+  const [y, m, d] = rep.until.split("-").map(Number);
+  return " until " + d + " " + MO[m - 1];
+}
+
+// ---------- quiet hours ----------
+// When `now` falls inside the quiet window, returns the moment it ends; otherwise 0.
+export function quietUntil(set, now) {
+  const f = set && set.quietFrom, t = set && set.quietTo;
+  if (!f || !t || f === t) return 0;
+  const o = tz(set), d = loc(now, o), n = d.getUTCHours() * 60 + d.getUTCMinutes(), [fh, fm] = hm(f), [th, tm] = hm(t), a = fh * 60 + fm, b = th * 60 + tm;
+  if (!(a < b ? n >= a && n < b : n >= a || n < b)) return 0;
+  const k = dayKey(now, o), end = keyTs(k, o, th, tm);
+  return end > now ? end : keyTs(addDays(k, 1), o, th, tm);
 }
 
 // ---------- reminders ----------
@@ -149,8 +169,11 @@ export function fires(rec, set, now) {
       const rolling = rec.kind === "event" && rec.rep;
       let occ = rec.at, found = 0, g = 0;
       while (g++ < 4000) {
-        const at = baseTime(occ, rec.allDay, set) - (r.off || 0) * MIN;
-        if (at > floor) { out.push({ key: rec.id + ":" + r.id, at, ch: r.ch, nag }); found++; }
+        if (repOver(rec, occ, o)) break;
+        if (!repSkipped(rec, occ, o)) {
+          const at = baseTime(occ, rec.allDay, set) - (r.off || 0) * MIN;
+          if (at > floor) { out.push({ key: rec.id + ":" + r.id, at, ch: r.ch, nag }); found++; }
+        }
         if (!rolling || found >= 2) break;
         occ = step(occ, rec.rep, o);
       }
@@ -179,7 +202,10 @@ export function complete(it, now, set) {
   const o = tz(set), n = { ...it, u: now };
   if (it.rep && it.at != null) {
     const after = it.allDay ? Math.max(it.at, keyTs(dayKey(now, o), o) - 1) : Math.max(it.at, now);
-    n.at = nextOcc(it.at, it.rep, o, after);
+    let next = nextOcc(it.at, it.rep, o, after), g = 0;
+    while (repSkipped(it, next, o) && g++ < 400) next = step(next, it.rep, o);
+    if (repOver(it, next, o)) { n.done = now; return n; } // that was the last one
+    n.at = next;
     n.subs = (it.subs || []).map((s) => ({ ...s, d: 0 }));
     n.cnt = (it.cnt || 0) + 1;
     n.spent = 0; n.left = ""; // tracked time and the "where I left off" note start fresh
