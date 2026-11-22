@@ -1229,7 +1229,8 @@ function edBody() {
     (ev ? "" : '<div class="f"><label>Subtasks</label>' + it.subs.map((s, i) => '<div class="sub"><button class="chk" data-a="subT" data-i="' + i + '" aria-pressed="' + !!s.d + '" aria-label="Toggle subtask"></button><input class="in" type="text" data-f="sub" data-i="' + i + '" value="' + esc(s.t) + '" aria-label="Subtask"><button class="x" data-a="subDel" data-i="' + i + '" aria-label="Remove subtask">×</button></div>').join("") +
       '<div class="sub"><input class="in" type="text" id="subNew" data-f="subNew" placeholder="Add a step, then press Enter" aria-label="New subtask"><button class="btn soft sm" data-a="subAdd">Add</button></div>' +
       '<button class="btn ghost sm" data-a="edAi">✨ Suggest steps</button><div class="msg" id="edAiMsg"></div></div>') +
-    (!ev && (it.left || it.spent) ? '<div class="f"><label>Where I left off</label><input class="in" data-f="left" value="' + esc(it.left || "") + '" aria-label="Where I left off">' + (it.spent ? '<p class="hint" style="margin-top:6px">Tracked so far: ' + dur(it.spent / 60) + (it.est ? " of a " + dur(it.est) + " guess" : "") + ".</p>" : "") + "</div>" : "") +
+    (!ev && (it.left || it.spent) ? '<div class="f"><label>Where I left off</label><input class="in" data-f="left" value="' + esc(it.left || "") + '" aria-label="Where I left off">' + "</div>" : "") +
+    (!ev && !ed.isNew ? '<div class="f"><label>Add time I focused</label><div class="chips">' + [15, 30, 60].map((n) => '<button class="chip" data-a="edTime" data-v="' + n + '">+' + n + " min</button>").join("") + '</div><div class="r2 bin"><input class="in" id="edTimeN" inputmode="numeric" placeholder="Other, in minutes" aria-label="Minutes focused"><button class="btn sm" data-a="edTime" data-v="c">Add</button></div><p class="hint" style="margin-top:6px">For work you did without the timer, including after the task is ticked off. It counts toward your focus minutes, XP and guess vs. tracked.' + (it.spent ? " Tracked so far: " + dur(it.spent / 60) + "." : "") + "</p></div>" : "") +
     '<div class="f"><label>Notes</label><textarea class="in" data-f="notes" aria-label="Notes">' + esc(it.notes || "") + "</textarea></div>" +
     '<div class="f r2"><button class="btn" data-a="closeSheet">Save</button>' + (ed.isNew ? '<button class="btn ghost" data-a="cancelSheet">Cancel</button>' : '<button class="btn danger" data-a="delItem">Delete</button>') + "</div>" +
     (ed.isNew ? "" : '<div class="links"><button class="link" data-a="cancelSheet">Discard my changes</button></div>');
@@ -2286,7 +2287,31 @@ if ("serviceWorker" in navigator) {
     if (d.open) sync().then(() => openFromLink(d.open, d.alarm));
   });
 }
+// Adds focus time by hand (work done without the timer, or after the task was ticked off).
+function addFocusTime(id, min) {
+  const it = db.recs[id]; if (!it || it.del) return null;
+  const t = Date.now(), prev = { ...it }, spent = (it.spent || 0) + min * 60, xp = Math.max(2, Math.round(min / 5) * 2);
+  put({ ...it, spent, u: t });
+  const l = put({ id: "l" + uid(), type: "log", k: "focus", ref: id, title: "Focused " + min + " min: " + it.title, at: t, xp, min });
+  let h = null, hp = null;
+  if (it.done && it.est) { // a finished task with a guess: keep its guess vs. tracked entry in step
+    const actual = Math.max(1, Math.round(spent / 60)), old = Object.values(db.recs).find((r) => r.type === "hist" && !r.del && r.title === it.title && r.est === it.est && Math.abs(r.at - it.done) < 60000);
+    if (old) { hp = { ...old }; h = put({ ...old, actual }); }
+    else if (spent >= 60) h = put({ id: "h" + uid(), type: "hist", title: it.title, est: it.est, actual, at: it.done });
+  }
+  return { xp, undo() { put(prev); del(l.id); if (h) { if (hp) put(hp); else del(h.id); } } };
+}
 Object.assign(A, {
+  edTime(el) {
+    if (!ed || ed.isNew) return;
+    const min = el.dataset.v === "c" ? Math.round(+String(($("#edTimeN") || {}).value || "").replace(/,/g, "")) : +el.dataset.v;
+    if (!(min >= 1 && min <= 1440)) return toast("Type the minutes you focused, from 1 to 1440.", null);
+    readForm();
+    const r = addFocusTime(ed.it.id, min); if (!r) return;
+    ed.it.spent = (ed.it.spent || 0) + min * 60;
+    setBody(edBody()); checkQuests(); render();
+    toast("Added " + dur(min) + ". +" + r.xp + " XP", () => { r.undo(); if (ed) { ed.it.spent = Math.max(0, (ed.it.spent || 0) - min * 60); setBody(edBody()); } render(); });
+  },
   water(el) {
     const t = today(), cur = bodyVal(t, "water") || 0;
     let n = el.dataset.v === "custom" ? parseNum(($("#bwaIn") || {}).value || "", "water") : +el.dataset.v;
